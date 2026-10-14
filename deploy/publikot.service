@@ -1,0 +1,21 @@
+[Unit]
+Description=Publikot Telegram publishing bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=publikot
+WorkingDirectory=/opt/publikot
+ExecStart=/opt/publikot/.venv/bin/python -m publikot
+Restart=on-failure
+RestartSec=15
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/publikot/data
+
+[Install]
+WantedBy=multi-user.target
