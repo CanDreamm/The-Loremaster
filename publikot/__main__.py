@@ -4,7 +4,7 @@ import sqlite3
 import sys
 import uuid
 
-from aiogram import Bot, Dispatcher, F, Router
+from aiogram import BaseMiddleware, Bot, Dispatcher, F, Router
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.filters import Command, CommandObject
 from aiogram.types import CallbackQuery, FSInputFile, InlineKeyboardButton, InlineKeyboardMarkup, Message
@@ -14,14 +14,38 @@ from .settings import ConfigError, Settings
 from .store import Conflict, Store
 
 HELP = (
-    'Публикот\n/new Название — создать проект\n/projects — список\n/select НОМЕР — выбрать\n'
+    'Публикот\n/projects — назначенные проекты\n/select НОМЕР — выбрать\n'
     '/concept Описание — концепция выбранного проекта\n/vk НОМЕР — ID сообщества, положительное число\n'
     '/character Имя | Описание — сохранить персонажа (можно с фото)\n/characters — персонажи проекта\n'
+    '/settings — настройки проекта\n/tone Тон\n/textprompt Промпт текста\n/imageprompt Промпт изображения\n/style Визуальный стиль\n'
+    '/reference Описание — сохранить приложенное фото как референс\n/references — референсы проекта\n'
     '/post Тема и тезисы — подготовить пост\nМожно отправить фото с подписью /post Тема и тезисы.\n'
     '/revise Замечание — переделать текст последнего задания\n/status — состояние последнего задания\n'
+    '/jobs — задания проекта\n/job НОМЕР — открыть задание\n/id — ваш Telegram ID\n'
     'После предпросмотра используйте кнопки подтверждения или отмены.\n'
     'Генерация изображений пока не подключена: используются ваши фотографии.'
 )
+
+
+class Access(BaseMiddleware):
+    def __init__(self, settings, store):
+        self.settings, self.store = settings, store
+
+    async def __call__(self, handler, event, data):
+        user = event.from_user
+        message = event if isinstance(event, Message) else event.message
+        if not user or user.is_bot or not message or message.chat.type != 'private':
+            return
+        if isinstance(event, Message) and (event.text or '').split('@')[0].strip() == '/id':
+            return await event.answer(f'Ваш Telegram ID: {user.id}')
+        if not self.store.is_allowed(user.id, self.settings.owner_id):
+            if isinstance(event, CallbackQuery):
+                return await event.answer('Доступ к боту не разрешён.', show_alert=True)
+            if (event.text or '').split('@')[0].strip() == '/start':
+                return await event.answer(f'Доступ пока не разрешён. Передайте администратору ваш ID: {user.id}')
+            return
+        data['actor_id'] = user.id
+        return await handler(event, data)
 
 
 def keyboard(job):
@@ -33,15 +57,12 @@ def keyboard(job):
 def build_router(settings, store):
     router = Router()
     text_ai = YandexText(settings.yandex_key, settings.yandex_folder, settings.demo)
-    publisher = VkPublisher(settings.vk_token)
+    router.message.outer_middleware(Access(settings, store))
+    router.callback_query.outer_middleware(Access(settings, store))
 
-    # Фильтры применяются ко всем сообщениям и callback, до чтения проектов.
-    router.message.filter(F.from_user.id == settings.owner_id, F.chat.type == 'private')
-    router.callback_query.filter(F.from_user.id == settings.owner_id, F.message.chat.type == 'private')
-
-    async def preview(message, ident):
-        job = store.job(settings.owner_id, ident)
-        version = store.revision(settings.owner_id, ident)
+    async def preview(message, ident, actor_id):
+        job = store.job(actor_id, ident)
+        version = store.revision(actor_id, ident)
         label = f"Проект №{job['project_id']}, задание №{ident}, версия {job['revision']}\n"
         label += f"ВК: club{job['target_group']}\n" if job['target_group'] else 'ВК не настроен — публикация заблокирована.\n'
         if version['is_demo']:
@@ -55,42 +76,139 @@ def build_router(settings, store):
         await message.answer('Подтвердите эту версию или отправьте /revise Ваши замечания.', reply_markup=keyboard(job))
 
     @router.message(Command('start', 'help'))
-    async def help_command(message: Message):
-        await message.answer(HELP + ('\n\nВключён безопасный демо-режим, запросов к ИИ нет.' if settings.demo else ''))
+    async def help_command(message: Message, actor_id: int):
+        admin = '\nАдминистратор: /new Название, /allow ID, /deny ID, /users, /allprojects, /assign ПРОЕКТ ID, /unassign ПРОЕКТ ID, /members ПРОЕКТ.' if actor_id == settings.owner_id else ''
+        await message.answer(HELP + admin + ('\n\nВключён безопасный демо-режим, запросов к ИИ нет.' if settings.demo else ''))
+
+    @router.message(Command('allow', 'deny', 'users'))
+    async def access_command(message: Message, command: CommandObject, actor_id: int):
+        try:
+            if actor_id != settings.owner_id:
+                raise Conflict('Эта команда доступна только администратору.')
+            if command.command == 'users':
+                text = 'Допущены к боту:\n' + '\n'.join(map(str, store.users(actor_id, settings.owner_id)))
+                for index in range(0, len(text), 3500):
+                    await message.answer(text[index:index+3500])
+                return
+            user = int((command.args or '').strip())
+            store.set_access(actor_id, user, command.command == 'allow', settings.owner_id)
+            await message.answer('Доступ обновлён. Проекты назначаются отдельно через /assign ПРОЕКТ ID.')
+        except ValueError:
+            await message.answer('Нужен числовой Telegram ID: /allow ID или /deny ID.')
+        except Conflict as error:
+            await message.answer(str(error))
+
+    @router.message(Command('assign', 'unassign', 'members', 'allprojects'))
+    async def members(message: Message, command: CommandObject, actor_id: int):
+        try:
+            if actor_id != settings.owner_id:
+                raise Conflict('Эта команда доступна только администратору.')
+            if command.command == 'allprojects':
+                rows = store.all_projects(actor_id, settings.owner_id)
+                text = '\n'.join(f"№{r['id']} — {r['name']}" for r in rows) or 'Проектов нет.'
+                for index in range(0, len(text), 3500):
+                    await message.answer(text[index:index+3500])
+                return
+            if command.command == 'members':
+                project_id = int((command.args or '').strip())
+                rows = store.members(actor_id, project_id, settings.owner_id)
+                text = '\n'.join(str(r['user_id']) for r in rows) or 'Нет назначенных участников.'
+                for index in range(0, len(text), 3500):
+                    await message.answer(text[index:index+3500])
+                return
+            args = (command.args or '').split()
+            if len(args) != 2:
+                raise ValueError
+            project_id, user = map(int, args)
+            if user <= 0:
+                raise ValueError
+            store.set_member(actor_id, project_id, user, command.command == 'assign', settings.owner_id)
+            await message.answer('Участники проекта обновлены.')
+        except ValueError:
+            await message.answer('Используйте /assign ПРОЕКТ ID, /unassign ПРОЕКТ ID или /members ПРОЕКТ.')
+        except Conflict as error:
+            await message.answer(str(error))
 
     @router.message(Command('new'))
-    async def new(message: Message, command: CommandObject):
+    async def new(message: Message, command: CommandObject, actor_id: int):
+        if actor_id != settings.owner_id:
+            return await message.answer('Проекты создаёт администратор. Ваши проекты: /projects.')
         name = (command.args or '').strip()
         if not name or len(name) > 100:
             return await message.answer('Используйте /new Название — до 100 символов.')
         try:
-            ident = store.create_project(settings.owner_id, name)
+            ident = store.create_project(actor_id, name)
         except sqlite3.IntegrityError:
             return await message.answer('Проект с таким именем уже существует. Посмотрите /projects.')
         await message.answer(f'Проект №{ident} создан и выбран. Задайте /concept Описание бренда.')
 
     @router.message(Command('projects'))
-    async def projects(message: Message):
-        rows = store.projects(settings.owner_id)
+    async def projects(message: Message, actor_id: int):
+        rows = store.projects(actor_id)
         text = '\n'.join(f"№{p['id']} — {p['name']}" for p in rows) or 'Проектов нет. Отправьте /new Название.'
         for index in range(0, len(text), 3500):
             await message.answer(text[index:index + 3500])
 
+    @router.message(Command('settings', 'tone', 'textprompt', 'imageprompt', 'style'))
+    async def project_settings(message: Message, command: CommandObject, actor_id: int):
+        fields = {'tone': 'tone', 'textprompt': 'text_prompt', 'imageprompt': 'image_prompt', 'style': 'visual_style'}
+        try:
+            project = store.project(actor_id)
+            if command.command == 'settings':
+                labels = {'concept': 'Концепция', 'tone': 'Тон', 'text_prompt': 'Промпт текста', 'image_prompt': 'Промпт изображения', 'visual_style': 'Визуальный стиль'}
+                text = f"Проект №{project['id']} — {project['name']}\n"
+                text += '\n\n'.join(f'{label}: {project[field] or "не задано"}' for field, label in labels.items())
+                for index in range(0, len(text), 3500):
+                    await message.answer(text[index:index+3500])
+                return
+            value = (command.args or '').strip()
+            if not value or len(value) > 12000:
+                return await message.answer('Введите значение после команды, до 12 000 символов. Для очистки — один дефис.')
+            store.configure(actor_id, fields[command.command], '' if value == '-' else value)
+            await message.answer('Настройки проекта сохранены. Они применяются к следующим генерациям.')
+        except Conflict as error:
+            await message.answer(str(error))
+
+    @router.message(Command('reference', 'references'))
+    async def references(message: Message, command: CommandObject, actor_id: int):
+        try:
+            project = store.project(actor_id)
+            if command.command == 'references':
+                rows = store.references(actor_id)
+                if not rows:
+                    return await message.answer('Референсов нет. Отправьте фото с подписью /reference Описание.')
+                for row in rows[-10:]:
+                    await message.answer_photo(FSInputFile(row['path']), caption=row['description'][:1000] or 'Референс проекта')
+                return
+            store.require(actor_id, project['id'])
+            if not message.photo or (message.photo[-1].file_size or 0) > 10 * 1024 * 1024:
+                return await message.answer('Нужно фото до 10 МБ с подписью /reference Описание.')
+            directory = settings.data_dir / 'references'
+            directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+            image = str(directory / (uuid.uuid4().hex + '.jpg'))
+            await message.bot.download(message.photo[-1], destination=image)
+            store.reference(actor_id, image, (command.args or '')[:4000], project_id=project['id'])
+            await message.answer('Референс проекта сохранён. Использование в генераторе изображений ещё не подключено.')
+        except Conflict as error:
+            await message.answer(str(error))
+        except Exception:
+            await message.answer('Не удалось сохранить или показать референс.')
+
     @router.message(Command('select', 'concept', 'vk'))
-    async def configure(message: Message, command: CommandObject):
+    async def configure(message: Message, command: CommandObject, actor_id: int):
         value = (command.args or '').strip()
         try:
             if command.command == 'select':
-                store.select(settings.owner_id, int(value))
+                store.select(actor_id, int(value))
             elif command.command == 'vk':
                 ident = int(value)
                 if ident <= 0:
                     raise ValueError
-                store.configure(settings.owner_id, 'vk_group', ident)
+                store.configure(actor_id, 'vk_group', ident)
             else:
                 if not value or len(value) > 12000:
                     raise ValueError
-                store.configure(settings.owner_id, 'concept', value)
+                store.configure(actor_id, 'concept', value)
             await message.answer('Сохранено. Изменение сообщества применяется только к новым заданиям.')
         except ValueError:
             await message.answer('Для /select и /vk нужен положительный числовой ID. Для /concept — описание до 12 000 символов.')
@@ -98,16 +216,16 @@ def build_router(settings, store):
             await message.answer(str(error))
 
     @router.message(Command('post', 'revise'))
-    async def generate(message: Message, command: CommandObject):
+    async def generate(message: Message, command: CommandObject, actor_id: int):
         brief = (command.args or '').strip()
         if not brief or len(brief) > 12000:
             return await message.answer('После команды укажите тему и тезисы или замечания — до 12 000 символов.')
         ident = None
         try:
-            project = store.project(settings.owner_id)
+            project = store.project(actor_id)
             previous, feedback = '', ''
             if command.command == 'revise':
-                job, old = store.revise(settings.owner_id)
+                job, old = store.revise(actor_id)
                 ident, revision = job['id'], job['revision']
                 previous, feedback, brief = old['body'], brief, job['brief']
             else:
@@ -120,30 +238,31 @@ def build_router(settings, store):
                     image_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
                     image = str(image_dir / (uuid.uuid4().hex + '.jpg'))
                     await message.bot.download(photo, destination=image)
-                ident, project = store.create_job(settings.owner_id, brief, image)
+                ident, project = store.create_job(actor_id, brief, image, project_id=project['id'])
                 revision = 1
             await message.answer('Готовлю текст. Публикации без подтверждения не будет.')
-            body = await text_ai.generate(project['concept'], brief, previous, feedback)
-            store.save_version(settings.owner_id, ident, revision, body, settings.demo)
+            context = '\n\n'.join(filter(None, [project['concept'], 'Тон: ' + project['tone'] if project['tone'] else '', project['text_prompt']]))
+            body = await text_ai.generate(context, brief, previous, feedback)
+            store.save_version(actor_id, ident, revision, body, settings.demo)
         except (Conflict, ProviderError) as error:
             if ident is not None:
-                store.finish(settings.owner_id, ident, 'failed')
+                store.finish(actor_id, ident, 'failed')
             return await message.answer(str(error))
         except Exception:
             if ident is not None:
-                store.finish(settings.owner_id, ident, 'failed')
+                store.finish(actor_id, ident, 'failed')
             return await message.answer('Не удалось подготовить материал. Проверьте подключение и /status.')
         try:
-            await preview(message, ident)
+            await preview(message, ident, actor_id)
         except Exception:
             await message.answer('Материал сохранён, но предпросмотр не доставлен. Повторите через /status.')
 
     @router.message(Command('character', 'characters'))
-    async def character(message: Message, command: CommandObject):
+    async def character(message: Message, command: CommandObject, actor_id: int):
         try:
-            store.project(settings.owner_id)
+            project = store.project(actor_id)
             if command.command == 'characters':
-                rows = store.characters(settings.owner_id)
+                rows = store.characters(actor_id)
                 text = '\n'.join(f"{p['name']}: {p['description']} (фото: {p['images']})" for p in rows) or 'Персонажей нет.'
                 for index in range(0, len(text), 3500):
                     await message.answer(text[index:index+3500])
@@ -160,7 +279,7 @@ def build_router(settings, store):
                 directory.mkdir(parents=True, exist_ok=True, mode=0o700)
                 image = str(directory / (uuid.uuid4().hex + '.jpg'))
                 await message.bot.download(message.photo[-1], destination=image)
-            store.character(settings.owner_id, name, description, image)
+            store.character(actor_id, name, description, image, project_id=project['id'])
             await message.answer('Персонаж сохранён. Для другого ракурса отправьте фото с тем же именем. Генерация по референсам пока не подключена.')
         except Conflict as error:
             await message.answer(str(error))
@@ -168,45 +287,64 @@ def build_router(settings, store):
             await message.answer('Не удалось сохранить персонажа. Попробуйте ещё раз.')
 
     @router.message(Command('status'))
-    async def status(message: Message):
+    async def status(message: Message, actor_id: int):
         try:
-            job = store.job(settings.owner_id)
+            job = store.job(actor_id)
             await message.answer(f"Задание №{job['id']}: {job['status']}" + ('\n' + job['remote_url'] if job['remote_url'] else ''))
             if job['status'] == 'review':
-                await preview(message, job['id'])
+                await preview(message, job['id'], actor_id)
+        except Conflict as error:
+            await message.answer(str(error))
+
+    @router.message(Command('jobs', 'job'))
+    async def project_jobs(message: Message, command: CommandObject, actor_id: int):
+        try:
+            if command.command == 'job':
+                store.select_job(actor_id, int((command.args or '').strip()))
+                job = store.job(actor_id)
+                if job['status'] == 'review':
+                    return await preview(message, job['id'], actor_id)
+                return await message.answer(f"Задание №{job['id']}: {job['status']}")
+            rows = store.jobs(actor_id)
+            await message.answer('\n'.join(f"№{r['id']}, версия {r['revision']}: {r['status']}" for r in rows) or 'Заданий нет.')
+        except ValueError:
+            await message.answer('Нужен номер: /job НОМЕР.')
         except Conflict as error:
             await message.answer(str(error))
 
     @router.callback_query(F.data.regexp(r'^(publish|cancel):\d+:\d+$'))
-    async def approve(callback: CallbackQuery):
+    async def approve(callback: CallbackQuery, actor_id: int):
         await callback.answer()
         action, ident, revision = callback.data.split(':')
         ident, revision = int(ident), int(revision)
         try:
             if action == 'cancel':
-                store.cancel(settings.owner_id, ident, revision)
+                store.cancel(actor_id, ident, revision)
                 return await callback.message.answer('Задание отменено.')
-            if not settings.vk_token:
+            candidate = store.job(actor_id, ident)
+            project = store.require(actor_id, candidate['project_id'])
+            token = settings.vk_token_for(actor_id, project['id'])
+            if not token:
                 raise Conflict('Ключ ВК не настроен. Публикация не выполнялась.')
-            job, version = store.claim(settings.owner_id, ident, revision)
+            job, version = store.claim(actor_id, ident, revision)
         except Conflict as error:
             return await callback.message.answer(str(error))
         try:
-            url = await publisher.publish(job['target_group'], version['body'], job['image_path'], ident)
+            url = await VkPublisher(token).publish(job['target_group'], version['body'], job['image_path'], ident)
         except AmbiguousPublish as error:
-            store.finish(settings.owner_id, ident, 'unknown')
+            store.finish(actor_id, ident, 'unknown')
             return await callback.message.answer(str(error))
         except ProviderError as error:
-            store.finish(settings.owner_id, ident, 'failed')
+            store.finish(actor_id, ident, 'failed')
             return await callback.message.answer(str(error))
         except Exception:
-            store.finish(settings.owner_id, ident, 'unknown')
+            store.finish(actor_id, ident, 'unknown')
             return await callback.message.answer('Результат неизвестен. Проверьте стену ВК. Автоматического повтора не будет.')
-        store.finish(settings.owner_id, ident, 'published', url)
+        store.finish(actor_id, ident, 'published', url)
         await callback.message.answer('Опубликовано: ' + url)
 
     @router.message()
-    async def fallback(message: Message):
+    async def fallback(message: Message, actor_id: int):
         await message.answer('Отправьте /help для списка команд. Фото прикрепляйте с подписью /post Тема и тезисы.')
 
     return router

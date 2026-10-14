@@ -1,4 +1,5 @@
 import tempfile
+import sqlite3
 import unittest
 from pathlib import Path
 
@@ -97,6 +98,73 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(character['description'], 'Рыжий')
         self.store.create_project(42, 'Другой бренд')
         self.assertEqual(self.store.characters(42), [])
+
+    def test_assignment_does_not_grant_bot_access(self):
+        with self.assertRaises(Conflict):
+            self.store.set_member(42, self.project, 99, True, 42)
+        self.store.set_access(42, 99, True, 42)
+        self.assertEqual(self.store.projects(99), [])
+        self.store.set_member(42, self.project, 99, True, 42)
+        self.store.select(99, self.project)
+        self.store.configure(99, 'text_prompt', 'Своя инструкция')
+        self.assertEqual(self.store.project(42)['text_prompt'], 'Своя инструкция')
+
+    def test_only_admin_can_assign_projects(self):
+        self.store.set_access(42, 99, True, 42)
+        self.store.set_member(42, self.project, 99, True, 42)
+        with self.assertRaises(Conflict):
+            self.store.set_member(99, self.project, 42, False, 42)
+
+    def test_admin_can_be_unassigned_without_losing_administration(self):
+        self.store.set_member(42, self.project, 42, False, 42)
+        self.assertEqual(self.store.projects(42), [])
+        self.assertEqual(len(self.store.all_projects(42, 42)), 1)
+        self.store.db.close()
+        self.store = Store(self.path)
+        self.assertEqual(self.store.projects(42), [])
+        self.store.set_member(42, self.project, 42, True, 42)
+        self.assertEqual(len(self.store.projects(42)), 1)
+
+    def test_removed_member_cannot_use_old_job_button(self):
+        self.store.set_access(42, 99, True, 42)
+        self.store.set_member(42, self.project, 99, True, 42)
+        ident = self.draft()
+        self.store.set_member(42, self.project, 99, False, 42)
+        with self.assertRaises(Conflict):
+            self.store.claim(99, ident, 1)
+
+    def test_project_settings_and_references_are_isolated(self):
+        self.store.configure(42, 'tone', 'Дружелюбный')
+        self.store.configure(42, 'image_prompt', 'Пастель')
+        self.store.reference(42, '/test/style.jpg', 'Палитра')
+        self.store.create_project(42, 'Второй')
+        self.assertEqual(self.store.project(42)['tone'], '')
+        self.assertEqual(self.store.references(42), [])
+        self.store.select(42, self.project)
+        self.assertEqual(self.store.references(42)[0]['description'], 'Палитра')
+
+    def test_old_database_migrates_without_losing_project(self):
+        legacy = Path(self.tmp.name) / 'legacy.sqlite3'
+        with sqlite3.connect(legacy) as db:
+            db.execute("CREATE TABLE projects(id INTEGER PRIMARY KEY,owner INTEGER NOT NULL,name TEXT NOT NULL,concept TEXT NOT NULL DEFAULT '',vk_group INTEGER,UNIQUE(owner,name))")
+            db.execute("INSERT INTO projects(owner,name,concept) VALUES (42,'Старый проект','Концепция')")
+        migrated = Store(legacy)
+        try:
+            self.assertEqual(migrated.projects(42)[0]['concept'], 'Концепция')
+            migrated.select(42, 1)
+            migrated.configure(42, 'tone', 'Новый тон')
+            self.assertEqual(migrated.project(42)['tone'], 'Новый тон')
+        finally:
+            migrated.db.close()
+
+    def test_project_does_not_change_during_attachment_download(self):
+        second = self.store.create_project(42, 'Другой')
+        self.store.reference(42, '/test/first.jpg', 'Первый', project_id=self.project)
+        ident, project = self.store.create_job(42, 'Задание первого', project_id=self.project)
+        self.assertEqual(project['id'], self.project)
+        self.assertEqual(self.store.job(42, ident)['project_id'], self.project)
+        self.assertEqual(self.store.project(42)['id'], second)
+        self.assertEqual(self.store.references(42), [])
 
 
 if __name__ == '__main__':

@@ -20,6 +20,15 @@ class Settings:
     yandex_folder: str
     vk_token: str
 
+    def vk_token_for(self, user_id, project_id=None):
+        # Глобальный ключ принадлежит только администратору, не всем приглашённым.
+        project_key = os.getenv(f'VK_ACCESS_TOKEN_PROJECT_{project_id}', '') if project_id is not None else ''
+        if project_key:
+            return project_key
+        if user_id == self.owner_id:
+            return self.vk_token
+        return os.getenv(f'VK_ACCESS_TOKEN_{user_id}', '')
+
     @classmethod
     def load(cls):
         load_dotenv(Path(__file__).resolve().parent.parent / '.env.python', override=False)

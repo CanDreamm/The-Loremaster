@@ -21,6 +21,20 @@ class Store:
           concept TEXT NOT NULL DEFAULT '', vk_group INTEGER,
           UNIQUE(owner, name)
         );
+        CREATE TABLE IF NOT EXISTS allowed_users (
+          telegram_id INTEGER PRIMARY KEY CHECK(telegram_id > 0),
+          added_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE TABLE IF NOT EXISTS project_members (
+          project_id INTEGER NOT NULL REFERENCES projects(id), user_id INTEGER NOT NULL,
+          role TEXT NOT NULL CHECK(role = 'member'),
+          PRIMARY KEY(project_id,user_id)
+        );
+        CREATE TABLE IF NOT EXISTS project_references (
+          id INTEGER PRIMARY KEY, project_id INTEGER NOT NULL REFERENCES projects(id),
+          path TEXT NOT NULL, description TEXT NOT NULL DEFAULT ''
+        );
+        CREATE TABLE IF NOT EXISTS schema_meta (name TEXT PRIMARY KEY);
         CREATE TABLE IF NOT EXISTS sessions (
           owner INTEGER PRIMARY KEY, project_id INTEGER REFERENCES projects(id), job_id INTEGER
         );
@@ -48,6 +62,15 @@ class Store:
           path TEXT NOT NULL
         );
         ''')
+        # Аддитивная миграция сохраняет базу первой версии и её владельцев.
+        columns = {r['name'] for r in self.db.execute('PRAGMA table_info(projects)')}
+        for field in ('tone', 'text_prompt', 'image_prompt', 'visual_style'):
+            if field not in columns:
+                self.db.execute(f"ALTER TABLE projects ADD COLUMN {field} TEXT NOT NULL DEFAULT ''")
+        with self.transaction():
+            if not self.db.execute("SELECT 1 FROM schema_meta WHERE name='project_members_backfilled'").fetchone():
+                self.db.execute("INSERT OR IGNORE INTO project_members(project_id,user_id,role) SELECT id,owner,'member' FROM projects")
+                self.db.execute("INSERT INTO schema_meta VALUES ('project_members_backfilled')")
         # Не повторяем внешние операции с неизвестным результатом после перезапуска.
         self.db.execute("UPDATE jobs SET status='unknown' WHERE status='publishing'")
         self.db.execute("UPDATE jobs SET status='failed' WHERE status='generating'")
@@ -65,14 +88,77 @@ class Store:
     def create_project(self, owner, name):
         with self.transaction():
             ident = self.db.execute('INSERT INTO projects(owner,name) VALUES (?,?)', (owner, name)).lastrowid
+            self.db.execute("INSERT INTO project_members VALUES (?,?,'member')", (ident, owner))
             self.db.execute('INSERT INTO sessions(owner,project_id) VALUES (?,?) ON CONFLICT(owner) DO UPDATE SET project_id=excluded.project_id,job_id=NULL', (owner, ident))
         return ident
 
-    def projects(self, owner):
-        return self.db.execute('SELECT * FROM projects WHERE owner=? ORDER BY id', (owner,)).fetchall()
+    def is_allowed(self, user, admin):
+        return user == admin or self.db.execute('SELECT 1 FROM allowed_users WHERE telegram_id=?', (user,)).fetchone() is not None
 
-    def character(self, owner, name, description, image=None):
-        project = self.project(owner)
+    def set_access(self, actor, user, allowed, admin):
+        if actor != admin:
+            raise Conflict('Эта команда доступна только администратору.')
+        if user <= 0:
+            raise Conflict('Нужен положительный Telegram ID.')
+        if user == admin:
+            raise Conflict('Администратор всегда имеет доступ.')
+        if allowed:
+            self.db.execute('INSERT OR IGNORE INTO allowed_users(telegram_id) VALUES (?)', (user,))
+        else:
+            self.db.execute('DELETE FROM allowed_users WHERE telegram_id=?', (user,))
+
+    def users(self, actor, admin):
+        if actor != admin:
+            raise Conflict('Эта команда доступна только администратору.')
+        return [admin] + [row['telegram_id'] for row in self.db.execute('SELECT telegram_id FROM allowed_users WHERE telegram_id<>? ORDER BY telegram_id', (admin,))]
+
+    def projects(self, owner):
+        return self.db.execute('SELECT p.*,m.role FROM projects p JOIN project_members m ON m.project_id=p.id WHERE m.user_id=? ORDER BY p.id', (owner,)).fetchall()
+
+    def require(self, user, project_id):
+        row = self.db.execute('SELECT p.*,m.role FROM projects p JOIN project_members m ON m.project_id=p.id WHERE p.id=? AND m.user_id=?', (project_id, user)).fetchone()
+        if not row:
+            raise Conflict('Нет доступа к проекту или недостаточно прав.')
+        return row
+
+    def all_projects(self, actor, admin):
+        if actor != admin:
+            raise Conflict('Эта команда доступна только администратору.')
+        return self.db.execute('SELECT * FROM projects ORDER BY id').fetchall()
+
+    def members(self, actor, project_id, admin):
+        if actor != admin:
+            raise Conflict('Эта команда доступна только администратору.')
+        if not self.db.execute('SELECT 1 FROM projects WHERE id=?', (project_id,)).fetchone():
+            raise Conflict('Проект не найден.')
+        return self.db.execute('SELECT user_id FROM project_members WHERE project_id=? ORDER BY user_id', (project_id,)).fetchall()
+
+    def set_member(self, actor, project_id, user, allowed, admin):
+        if actor != admin:
+            raise Conflict('Назначать проекты может только администратор.')
+        if user <= 0 or not self.db.execute('SELECT 1 FROM projects WHERE id=?', (project_id,)).fetchone():
+            raise Conflict('Проверьте номер проекта и Telegram ID участника.')
+        if allowed and not self.is_allowed(user, admin):
+            raise Conflict('Сначала администратор должен разрешить этому пользователю доступ к боту.')
+        with self.transaction():
+            if not allowed:
+                self.db.execute('DELETE FROM project_members WHERE project_id=? AND user_id=?', (project_id, user))
+                self.db.execute('UPDATE sessions SET project_id=NULL,job_id=NULL WHERE owner=? AND project_id=?', (user, project_id))
+            else:
+                self.db.execute("INSERT OR IGNORE INTO project_members VALUES (?,?,'member')", (project_id, user))
+
+    def reference(self, actor, path, description, project_id=None):
+        project = self.require(actor, project_id) if project_id is not None else self.project(actor)
+        self.require(actor, project['id'])
+        self.db.execute('INSERT INTO project_references(project_id,path,description) VALUES (?,?,?)', (project['id'], path, description))
+
+    def references(self, actor):
+        project = self.project(actor)
+        return self.db.execute('SELECT * FROM project_references WHERE project_id=? ORDER BY id', (project['id'],)).fetchall()
+
+    def character(self, owner, name, description, image=None, project_id=None):
+        project = self.require(owner, project_id) if project_id is not None else self.project(owner)
+        self.require(owner, project['id'])
         with self.transaction():
             self.db.execute('INSERT INTO characters(project_id,name,description) VALUES (?,?,?) ON CONFLICT(project_id,name) DO UPDATE SET description=CASE WHEN excluded.description <> \'\' THEN excluded.description ELSE characters.description END', (project['id'], name, description))
             row = self.db.execute('SELECT id FROM characters WHERE project_id=? AND name=?', (project['id'], name)).fetchone()
@@ -84,41 +170,51 @@ class Store:
         return self.db.execute('SELECT c.*, (SELECT count(*) FROM character_images i WHERE i.character_id=c.id) AS images FROM characters c WHERE c.project_id=? ORDER BY c.id', (project['id'],)).fetchall()
 
     def select(self, owner, ident):
-        if not self.db.execute('SELECT 1 FROM projects WHERE owner=? AND id=?', (owner, ident)).fetchone():
-            raise Conflict('Проект не найден.')
+        self.require(owner, ident)
         self.db.execute('INSERT INTO sessions(owner,project_id) VALUES (?,?) ON CONFLICT(owner) DO UPDATE SET project_id=excluded.project_id,job_id=NULL', (owner, ident))
 
     def project(self, owner):
-        row = self.db.execute('SELECT p.* FROM projects p JOIN sessions s ON s.project_id=p.id WHERE s.owner=? AND p.owner=?', (owner, owner)).fetchone()
+        row = self.db.execute('SELECT p.*,m.role FROM projects p JOIN sessions s ON s.project_id=p.id JOIN project_members m ON m.project_id=p.id AND m.user_id=s.owner WHERE s.owner=?', (owner,)).fetchone()
         if not row:
             raise Conflict('Создайте /new Название или выберите /select НОМЕР.')
         return row
 
     def configure(self, owner, field, value):
-        if field not in ('concept', 'vk_group'):
+        if field not in ('concept', 'vk_group', 'tone', 'text_prompt', 'image_prompt', 'visual_style'):
             raise ValueError('Invalid field')
         project = self.project(owner)
-        self.db.execute(f'UPDATE projects SET {field}=? WHERE id=? AND owner=?', (value, project['id'], owner))
+        self.require(owner, project['id'])
+        self.db.execute(f'UPDATE projects SET {field}=? WHERE id=?', (value, project['id']))
 
-    def create_job(self, owner, brief, image_path=None):
-        project = self.project(owner)
+    def create_job(self, owner, brief, image_path=None, project_id=None):
+        project = self.require(owner, project_id) if project_id is not None else self.project(owner)
+        self.require(owner, project['id'])
         with self.transaction():
             ident = self.db.execute("INSERT INTO jobs(owner,project_id,brief,image_path,status,target_group) VALUES (?,?,?,?,'generating',?)", (owner, project['id'], brief, image_path, project['vk_group'])).lastrowid
-            self.db.execute('UPDATE sessions SET job_id=? WHERE owner=?', (ident, owner))
+            self.db.execute('UPDATE sessions SET job_id=? WHERE owner=? AND project_id=?', (ident, owner, project['id']))
         return ident, dict(project)
 
     def job(self, owner, ident=None):
         if ident is None:
-            row = self.db.execute('SELECT j.* FROM jobs j JOIN sessions s ON s.job_id=j.id WHERE s.owner=? AND j.owner=?', (owner, owner)).fetchone()
+            row = self.db.execute('SELECT j.* FROM jobs j JOIN sessions s ON s.job_id=j.id JOIN project_members m ON m.project_id=j.project_id AND m.user_id=s.owner WHERE s.owner=?', (owner,)).fetchone()
         else:
-            row = self.db.execute('SELECT * FROM jobs WHERE id=? AND owner=?', (ident, owner)).fetchone()
+            row = self.db.execute('SELECT j.* FROM jobs j JOIN project_members m ON m.project_id=j.project_id WHERE j.id=? AND m.user_id=?', (ident, owner)).fetchone()
         if not row:
             raise Conflict('Задание не найдено.')
         return dict(row)
 
+    def jobs(self, actor):
+        project = self.project(actor)
+        return self.db.execute('SELECT id,revision,status FROM jobs WHERE project_id=? ORDER BY id DESC LIMIT 30', (project['id'],)).fetchall()
+
+    def select_job(self, actor, ident):
+        job = self.job(actor, ident)
+        self.db.execute('INSERT INTO sessions(owner,project_id,job_id) VALUES (?,?,?) ON CONFLICT(owner) DO UPDATE SET project_id=excluded.project_id,job_id=excluded.job_id', (actor, job['project_id'], ident))
+
     def save_version(self, owner, ident, revision, body, demo):
         with self.transaction():
             job = self.job(owner, ident)
+            self.require(owner, job['project_id'])
             if job['status'] != 'generating' or job['revision'] != revision:
                 raise Conflict('Задание уже изменилось.')
             self.db.execute('INSERT INTO versions VALUES (?,?,?,?)', (ident, revision, body, int(demo)))
@@ -131,6 +227,7 @@ class Store:
     def revise(self, owner):
         with self.transaction():
             job = self.job(owner)
+            self.require(owner, job['project_id'])
             if job['status'] != 'review':
                 raise Conflict('Исправление возможно только для черновика на согласовании.')
             previous = dict(self.revision(owner, job['id']))
@@ -140,6 +237,7 @@ class Store:
     def claim(self, owner, ident, revision):
         with self.transaction():
             job = self.job(owner, ident)
+            self.require(owner, job['project_id'])
             if job['status'] != 'review' or job['revision'] != revision:
                 raise Conflict('Эта кнопка устарела или задание уже обработано.')
             version = self.revision(owner, ident)
@@ -152,11 +250,14 @@ class Store:
         return job, dict(version)
 
     def cancel(self, owner, ident, revision):
-        result = self.db.execute("UPDATE jobs SET status='cancelled' WHERE owner=? AND id=? AND revision=? AND status='review'", (owner, ident, revision))
+        job = self.job(owner, ident)
+        self.require(owner, job['project_id'])
+        result = self.db.execute("UPDATE jobs SET status='cancelled' WHERE id=? AND revision=? AND status='review'", (ident, revision))
         if result.rowcount != 1:
             raise Conflict('Кнопка устарела или задание уже обработано.')
 
     def finish(self, owner, ident, status, url=None):
         if status not in ('failed', 'unknown', 'published'):
             raise ValueError('Invalid final status')
-        self.db.execute('UPDATE jobs SET status=?,remote_url=? WHERE id=? AND owner=?', (status, url, ident, owner))
+        self.job(owner, ident)
+        self.db.execute('UPDATE jobs SET status=?,remote_url=? WHERE id=?', (status, url, ident))
