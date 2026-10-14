@@ -1,5 +1,5 @@
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -11,35 +11,43 @@ class ConfigError(Exception):
 
 @dataclass(frozen=True)
 class Settings:
-    token: str
+    bot_token: str = field(repr=False)
+    group_id: int
     owner_id: int
     data_dir: Path
-    proxy: str | None
-    demo: bool
-    yandex_key: str
-    yandex_folder: str
-    vk_token: str
+    demo: bool = True
+    yandex_key: str = field(default='', repr=False)
+    yandex_folder: str = ''
+    vk_token: str = field(default='', repr=False)
+
+    @property
+    def database(self):
+        # Telegram и VK имеют разные пространства ID: базы нельзя смешивать.
+        return self.data_dir / 'publikot-vk.sqlite3'
 
     def vk_token_for(self, user_id, project_id=None):
-        # Глобальный ключ принадлежит только администратору, не всем приглашённым.
         project_key = os.getenv(f'VK_ACCESS_TOKEN_PROJECT_{project_id}', '') if project_id is not None else ''
         if project_key:
             return project_key
         if user_id == self.owner_id:
             return self.vk_token
-        return os.getenv(f'VK_ACCESS_TOKEN_{user_id}', '')
+        return os.getenv(f'VK_ACCESS_TOKEN_USER_{user_id}', '')
 
     @classmethod
-    def load(cls):
+    def load(cls, require_owner=True):
         load_dotenv(Path(__file__).resolve().parent.parent / '.env.python', override=False)
-        token = os.getenv('TELEGRAM_BOT_TOKEN', '')
-        owner = os.getenv('OWNER_TELEGRAM_ID', '')
+        token = os.getenv('VK_BOT_TOKEN', '')
+        group = os.getenv('VK_BOT_GROUP_ID', '242305804')
+        owner = os.getenv('OWNER_VK_ID', '')
         if not token:
-            raise ConfigError('Задайте TELEGRAM_BOT_TOKEN в .env.python')
-        if not owner.isdecimal() or int(owner) <= 0:
-            raise ConfigError('Задайте положительный OWNER_TELEGRAM_ID в .env.python')
-        return cls(token, int(owner), Path(os.getenv('DATA_DIR', './data')).resolve(),
-                   os.getenv('TELEGRAM_PROXY') or None,
+            raise ConfigError('Задайте VK_BOT_TOKEN в .env.python')
+        if not group.isdecimal() or int(group) <= 0:
+            raise ConfigError('Задайте положительный VK_BOT_GROUP_ID')
+        if owner and (not owner.isdecimal() or int(owner) <= 0):
+            raise ConfigError('OWNER_VK_ID должен быть положительным числовым ID ВК')
+        if require_owner and not owner:
+            raise ConfigError('Задайте OWNER_VK_ID. Для определения ID: python -m publikot --identify')
+        return cls(token, int(group), int(owner or 0), Path(os.getenv('DATA_DIR', './data')).resolve(),
                    os.getenv('DEMO_MODE', 'true').lower() == 'true',
                    os.getenv('YANDEX_API_KEY', ''), os.getenv('YANDEX_FOLDER_ID', ''),
                    os.getenv('VK_ACCESS_TOKEN', ''))

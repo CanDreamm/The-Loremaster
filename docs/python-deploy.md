@@ -1,31 +1,19 @@
-# Запуск Python-бота на существующем VPS Рег.Облака
+# Запуск Python-бота ВК на VPS Рег.Облака
 
-Существующие n8n и PostgreSQL пока не удаляем. Следующие команды выполняются
-на вашем VPS, не в облачной среде разработки. Нужен Ubuntu 24.04 и доступ root по SSH.
-Порт для бота открывать не нужно: он сам обращается к Telegram через прокси.
+Ubuntu 24.04, Python 3.12+, доступ root по SSH. Для VK Bots Long Poll достаточно
+исходящих HTTPS-соединений. Прокси, домен и открытый порт для бота не нужны.
+Существующие n8n и PostgreSQL не удаляйте до отдельного решения.
 
-## 1. Получить код через GitHub
+## Первая установка
 
-В SSH-терминале сервера, под root:
+Команды выполняются на сервере, по одной. При ошибке остановитесь.
+Если /opt/publikot или пользователь publikot уже существуют, сначала проверьте
+их состояние: не клонируйте поверх существующей установки и не удаляйте данные.
 
 ```sh
 apt-get update
 apt-get install -y git python3-venv
-```
-
-Если /opt/publikot уже существует, сначала проверьте содержимое. Не удаляйте
-папку и не клонируйте поверх неизвестной установки. Для новой установки:
-
-```sh
 git clone --branch master https://github.com/CanDreamm/The-Loremaster.git /opt/publikot
-```
-
-Если GitHub запросит авторизацию, остановитесь: для закрытого репозитория отдельно
-настроим доступ на чтение через SSH deploy key. Не вводите токен в URL команды.
-
-## 2. Установить зависимости
-
-```sh
 adduser --system --group --home /opt/publikot --no-create-home publikot
 python3 -m venv /opt/publikot/.venv
 /opt/publikot/.venv/bin/python -m pip install -r /opt/publikot/requirements.lock
@@ -34,41 +22,33 @@ chown -R publikot:publikot /opt/publikot
 chmod 700 /opt/publikot/data
 ```
 
-## 3. Настройки
+При запросе авторизации GitHub остановитесь — отдельно настроим доступ на чтение.
+Не вводите токен в URL клонирования.
+
+## Настройка ВК и пробный запуск
+
+Включите сообщения и Bots Long Poll: [docs/vk-setup.md](vk-setup.md).
 
 ```sh
 cd /opt/publikot
 sudo -u publikot .venv/bin/python scripts/setup-python.py
-```
-
-Ввод токена и адреса прокси скрыт. Формат TELEGRAM_PROXY:
-`http://USER:PASSWORD@HOST:PORT` или `socks5://USER:PASSWORD@HOST:PORT`.
-Спецсимволы в пароле должны быть URL-кодированы. Данные не передавайте в чат.
-Если ID Telegram неизвестен, оставьте его пустым, затем выполните:
-
-```sh
+sudo -u publikot .venv/bin/python -m publikot --check
 sudo -u publikot .venv/bin/python -m publikot --identify
 ```
 
-Отправьте /start в личную переписку @publikot_bot. Найдите свой ID в выводе.
-Откройте файл локально командой `nano /opt/publikot/.env.python` и заполните
-OWNER_TELEGRAM_ID. Для начала оставьте DEMO_MODE=true.
-
-Если бот сообщает о вебхуке, сначала отключите старый Telegram workflow n8n,
-затем выполните `sudo -u publikot .venv/bin/python -m publikot --identify --clear-webhook`.
-Не делайте этого, если старый workflow ещё нужен для другой работы.
-
-## 4. Пробный запуск
+Отправьте /id в сообщения сообщества, укажите свой ID ВК повторным запуском
+setup-python.py, оставив ключ пустым для сохранения текущего значения.
 
 ```sh
 sudo -u publikot .venv/bin/python -m publikot
 ```
 
-В Telegram: /start → /new Первый проект → /concept Описание → /post Тема.
-Проверьте /revise Сделай короче, /status и отмену. В демо публикация запрещена.
-Ctrl+C завершает пробный запуск. Это нужно сделать до запуска постоянной службы.
+Проверьте /start, создание проекта, демо-генерацию, кнопки исправления и отмены.
+Ctrl+C остановит пробный процесс. При переходе с Telegram используется отдельная
+база publikot-vk.sqlite3. Старую базу и файлы никто не удаляет; ID автоматически
+не переносятся между платформами.
 
-## 5. Автозапуск
+## Постоянная служба
 
 ```sh
 cp /opt/publikot/deploy/publikot.service /etc/systemd/system/publikot.service
@@ -77,34 +57,19 @@ systemctl enable --now publikot
 systemctl status publikot --no-pager
 ```
 
-Логи: `journalctl -u publikot -n 50 --no-pager`.
-После изменения .env.python: `systemctl restart publikot`.
-Секреты нельзя передавать в аргументах команд или выкладывать в переписку.
+Логи: `journalctl -u publikot -n 50 --no-pager`. После правок .env.python:
+`systemctl restart publikot`. Тестовый процесс сначала остановите: должен
+работать один экземпляр бота.
 
-## 6. Реальные сервисы — после пробного запуска
+## Обновления через Git
 
-Подключить Yandex AI Studio и проверить оплату, баланс и генерацию на вашем
-аккаунте. Подключить ключ ВК и тестовое сообщество, проверить текстовый пост,
-затем фото. Установить DEMO_MODE=false и перезапустить службу. Провести полный
-цикл с исправлением и подтверждением, проверить отсутствие повторной отправки.
-GenAPI подключается отдельно после выбора модели; не покупайте большой пакет заранее.
-
-Если отправка имеет статус unknown, проверьте стену ВК вручную. Автоматического
-повтора нет, чтобы не создавать дубли. Незавершённая генерация после перезапуска
-получает failed: создайте новое задание. Версии и другие данные сохраняются.
-
-После успешного переноса можно отдельно решить, останавливать ли n8n и postgres,
-чтобы освободить память на сервере с 1 ГБ RAM. Данные сначала сохраняются.
-
-## 7. Обновления через Git
-
-Сначала остановите бота и сделайте резервную копию, если база уже существует.
-Для каждой копии нужен новый путь; в примере замените UPDATE_DATE на дату и время:
+Остановите службу, сделайте резервную копию существующей базы и обновите код.
+В пути копии замените UPDATE_DATE на дату/время, чтобы не перезаписать старую.
 
 ```sh
 systemctl stop publikot
 cd /opt/publikot
-sudo -u publikot .venv/bin/python scripts/backup.py data/publikot.sqlite3 backups/before-UPDATE_DATE.sqlite3
+sudo -u publikot .venv/bin/python scripts/backup.py data/publikot-vk.sqlite3 backups/before-UPDATE_DATE.sqlite3
 sudo -u publikot git pull --ff-only origin master
 sudo -u publikot .venv/bin/python -m pip install -r requirements.lock
 sudo -u publikot .venv/bin/python -m unittest discover -s tests -v
@@ -112,7 +77,15 @@ systemctl start publikot
 systemctl status publikot --no-pager
 ```
 
-Выполняйте команды по одной. При ошибке остановитесь и разберите её до запуска
-следующих команд. Если Git сообщает о локальных изменениях, не используйте reset
-или force: сначала сохраните и проверьте изменения. `.env.python` и `data/` не
-отслеживаются Git и обычным обновлением кода не заменяются.
+Если базы ВК ещё нет, этап backup пропускается; старую базу Telegram сохраняйте
+по её исходному имени. Фото и .env.python копируйте отдельно. При ошибке Git не
+используйте reset или force: сначала сохраните локальные изменения.
+
+## Дальше
+
+Подключить Yandex, проверить оплату и реальную генерацию. Для публикации задать
+отдельный ключ проекта, проверить пост и фото в тестовом сообществе. Участникам
+назначаются ID ВК. GenAPI и генерация изображений — отдельный следующий этап.
+Результат публикации unknown требует ручной проверки стены, не повторного нажатия.
+Прерванные события и генерации автоматически не возобновляются: проверьте /status.
+Квоты ИИ и фоновая очередь пока не реализованы.

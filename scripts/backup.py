@@ -4,7 +4,7 @@ import sys
 from pathlib import Path
 
 if len(sys.argv) != 3:
-    raise SystemExit('Использование: python scripts/backup.py data/publikot.sqlite3 backups/backup.sqlite3')
+    raise SystemExit('Использование: python scripts/backup.py data/publikot-vk.sqlite3 backups/backup.sqlite3')
 source, target = map(Path, sys.argv[1:])
 if not source.is_file() or target.exists():
     raise SystemExit('Нужна существующая база и новый путь для копии.')

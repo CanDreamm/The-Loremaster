@@ -166,6 +166,22 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(self.store.project(42)['id'], second)
         self.assertEqual(self.store.references(42), [])
 
+    def test_processed_events_remain_deduplicated_after_restart(self):
+        self.assertTrue(self.store.begin_event('vk:1'))
+        self.store.end_event('vk:1', True)
+        self.store.cursor(242305804, '123')
+        self.store.db.close()
+        self.store = Store(self.path)
+        self.assertFalse(self.store.begin_event('vk:1'))
+        self.assertEqual(self.store.cursor(242305804), '123')
+
+    def test_crashed_events_are_not_automatically_reexecuted(self):
+        self.assertTrue(self.store.begin_event('vk:interrupted'))
+        self.store.db.close()
+        self.store = Store(self.path)
+        self.assertFalse(self.store.begin_event('vk:interrupted'))
+        self.assertEqual(self.store.db.execute("SELECT status FROM inbox WHERE event_id='vk:interrupted'").fetchone()['status'], 'failed')
+
 
 if __name__ == '__main__':
     unittest.main()

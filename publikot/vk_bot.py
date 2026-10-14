@@ -1,0 +1,261 @@
+import json
+import sqlite3
+import uuid
+
+from .providers import AmbiguousPublish, ProviderError, VkPublisher, YandexText
+from .store import Conflict
+
+HELP = (
+    'Публикот — помощник публикаций\n'
+    '/id — ваш ID ВК\n/projects — назначенные проекты\n/select НОМЕР — выбрать\n'
+    '/settings — настройки\n/concept Описание\n/tone Тон общения\n'
+    '/textprompt Промпт текста\n/imageprompt Промпт картинки\n/style Визуальный стиль\n'
+    '/vk НОМЕР — сообщество для публикаций\n'
+    '/reference Описание — сохранить приложенное фото как референс\n/references — показать референсы\n'
+    '/character Имя | Описание — персонаж, можно с фото\n/characters — список\n'
+    '/post Тема и тезисы — подготовить пост, можно приложить фото\n'
+    '/revise Замечания — исправить текст\n/image НОМЕР — заменить картинку приложенным фото\n'
+    '/jobs — задания проекта\n/job НОМЕР — открыть задание\n/status — текущее задание\n'
+    'Генерация изображений пока не подключена. Фото используется как готовая иллюстрация.'
+)
+ADMIN_HELP = '\nАдминистратор: /new Название, /allow ID, /deny ID, /users, /allprojects, /assign ПРОЕКТ ID, /unassign ПРОЕКТ ID, /members ПРОЕКТ.'
+
+
+def preview_keyboard(job):
+    def button(label, action, color='secondary'):
+        payload = json.dumps({'action': action, 'job': job['id'], 'revision': job['revision']})
+        return {'action': {'type': 'text', 'label': label, 'payload': payload}, 'color': color}
+    return {'inline': True, 'buttons': [
+        [button('Опубликовать', 'publish', 'positive'), button('Отменить', 'cancel', 'negative')],
+        [button('Изменить текст', 'edittext'), button('Изменить изображение', 'editimage')]]}
+
+
+class VkBot:
+    def __init__(self, settings, store, client, text_ai=None, publisher_factory=VkPublisher):
+        self.settings, self.store, self.client = settings, store, client
+        self.text_ai = text_ai or YandexText(settings.yandex_key, settings.yandex_folder, settings.demo)
+        self.publisher_factory = publisher_factory
+
+    async def handle(self, event):
+        if event.get('type') != 'message_new' or event.get('group_id') != self.settings.group_id:
+            return
+        message = event.get('object', {}).get('message', {})
+        actor, peer = message.get('from_id', 0), message.get('peer_id', 0)
+        if not isinstance(actor, int) or actor <= 0 or peer != actor or message.get('out'):
+            return  # Только личные сообщения сообщества от пользователя.
+        number = message.get('conversation_message_id') or message.get('id')
+        event_id = event.get('event_id') or (f'{peer}:{number}' if number else None)
+        if not event_id or not self.store.begin_event(f'{self.settings.group_id}:{event_id}'):
+            return
+        key = f'{self.settings.group_id}:{event_id}'
+        try:
+            text = (message.get('text') or '').strip()
+            command, _, args = text.partition(' ')
+            command = command.lower()
+            if command == '/id':
+                await self.client.send(peer, f'Ваш ID ВК: {actor}')
+            elif not self.store.is_allowed(actor, self.settings.owner_id):
+                if command in ('/start', 'начать', 'начать работу'):
+                    await self.client.send(peer, f'Доступ пока не разрешён. Передайте администратору ваш ID ВК: {actor}')
+            elif message.get('payload'):
+                try:
+                    payload = json.loads(message['payload'])
+                    if not isinstance(payload, dict):
+                        raise ValueError
+                    await self.action(actor, peer, payload)
+                except (ValueError, TypeError, KeyError):
+                    await self.client.send(peer, 'Кнопка некорректна. Откройте /status заново.')
+            else:
+                await self.command(actor, peer, command, args.strip(), message)
+        except (Conflict, ProviderError) as error:
+            await self.client.send(peer, str(error))
+        except ValueError:
+            await self.client.send(peer, 'Проверьте числовые ID и аргументы команды. Справка: /help.')
+        except sqlite3.IntegrityError:
+            await self.client.send(peer, 'Запись уже существует. Проверьте /projects или /status.')
+        except Exception:
+            self.store.end_event(key, False)
+            raise
+        self.store.end_event(key, True)
+
+    async def photo(self, message, directory):
+        attachments = [a['photo'] for a in message.get('attachments', []) if a.get('type') == 'photo' and 'photo' in a]
+        if not attachments:
+            return None
+        if len(attachments) != 1:
+            raise Conflict('Для одного материала прикрепите одну фотографию.')
+        sizes = attachments[0].get('sizes', [])
+        if not sizes:
+            raise Conflict('ВК не передал доступную фотографию. Прикрепите её заново.')
+        largest = max(sizes, key=lambda item: item.get('width', 0)*item.get('height', 0))
+        folder = self.settings.data_dir / directory
+        folder.mkdir(parents=True, exist_ok=True, mode=0o700)
+        path = folder / (uuid.uuid4().hex + '.jpg')
+        await self.client.download(largest['url'], path)
+        return str(path)
+
+    async def preview(self, actor, peer, ident):
+        job = self.store.job(actor, ident)
+        version = self.store.revision(actor, ident)
+        if version is None:
+            raise Conflict('Черновик ещё не готов.')
+        label = f"Проект №{job['project_id']}, задание №{ident}, версия {job['revision']}\n"
+        label += f"Публикация: vk.ru/club{job['target_group']}\n" if job['target_group'] else 'Сообщество публикации не задано.\n'
+        if version['is_demo']:
+            label += 'ДЕМО: публикация запрещена.\n'
+        await self.client.send(peer, label)
+        if version['image_path']:
+            await self.client.send_photo(peer, version['image_path'])
+        await self.client.send(peer, version['body'])
+        if job['status'] == 'review':
+            await self.client.send(peer, 'Подтвердите эту версию или внесите изменения.', keyboard=preview_keyboard(job))
+
+    async def command(self, actor, peer, command, args, message):
+        s, admin = self.store, self.settings.owner_id
+        if command in ('/start', '/help', 'начать', 'начать работу'):
+            return await self.client.send(peer, HELP + (ADMIN_HELP if actor == admin else '') + ('\n\nДемо-режим: запросы к ИИ не выполняются.' if self.settings.demo else ''))
+        if command in ('/allow', '/deny', '/users', '/allprojects', '/new', '/assign', '/unassign', '/members'):
+            if actor != admin:
+                raise Conflict('Эта команда доступна только администратору.')
+            if command in ('/allow', '/deny'):
+                s.set_access(actor, int(args), command == '/allow', admin)
+                return await self.client.send(peer, 'Доступ обновлён. Назначение проекта: /assign ПРОЕКТ ID.')
+            if command == '/users':
+                return await self.client.send(peer, 'Допущены к боту:\n' + '\n'.join(map(str, s.users(actor, admin))))
+            if command == '/allprojects':
+                return await self.client.send(peer, '\n'.join(f"№{p['id']} — {p['name']}" for p in s.all_projects(actor, admin)) or 'Проектов нет.')
+            if command == '/new':
+                if not args or len(args) > 100:
+                    raise Conflict('Используйте /new Название — до 100 символов.')
+                ident = s.create_project(actor, args)
+                return await self.client.send(peer, f'Проект №{ident} создан и выбран. Задайте /concept Описание бренда.')
+            if command == '/members':
+                rows = s.members(actor, int(args), admin)
+                return await self.client.send(peer, '\n'.join(str(r['user_id']) for r in rows) or 'Нет участников.')
+            project, user = map(int, args.split())
+            s.set_member(actor, project, user, command == '/assign', admin)
+            return await self.client.send(peer, 'Назначения обновлены.')
+        if command == '/projects':
+            rows = s.projects(actor)
+            return await self.client.send(peer, '\n'.join(f"№{p['id']} — {p['name']}" for p in rows) or 'Назначенных проектов нет. Обратитесь к администратору.')
+        if command == '/select':
+            s.select(actor, int(args))
+            return await self.client.send(peer, 'Проект выбран. /settings — настройки, /post Тема — новый пост.')
+        fields = {'/concept': 'concept', '/tone': 'tone', '/textprompt': 'text_prompt', '/imageprompt': 'image_prompt', '/style': 'visual_style'}
+        if command in fields:
+            if not args or len(args) > 12000:
+                raise Conflict('Введите значение после команды. Один дефис очищает настройку.')
+            s.configure(actor, fields[command], '' if args == '-' else args)
+            return await self.client.send(peer, 'Настройка проекта сохранена.')
+        if command == '/vk':
+            group = int(args)
+            if group <= 0:
+                raise ValueError
+            s.configure(actor, 'vk_group', group)
+            return await self.client.send(peer, 'Сообщество публикаций сохранено для новых заданий. Оно не связано автоматически с сообществом бота.')
+        if command == '/settings':
+            project = s.project(actor)
+            labels = {'concept': 'Концепция', 'tone': 'Тон', 'text_prompt': 'Промпт текста', 'image_prompt': 'Промпт картинки', 'visual_style': 'Визуальный стиль', 'vk_group': 'Сообщество публикаций'}
+            return await self.client.send(peer, f"Проект №{project['id']} — {project['name']}\n" + '\n\n'.join(f'{label}: {project[field] or "не задано"}' for field, label in labels.items()))
+        if command in ('/reference', '/references', '/character', '/characters'):
+            project = s.project(actor)
+            if command == '/references':
+                rows = s.references(actor)
+                for row in rows[-10:]:
+                    await self.client.send_photo(peer, row['path'], row['description'][:1000])
+                if not rows:
+                    await self.client.send(peer, 'Референсов нет. Прикрепите фото с подписью /reference Описание.')
+                return
+            if command == '/characters':
+                rows = s.characters(actor)
+                return await self.client.send(peer, '\n'.join(f"{p['name']}: {p['description']} (фото: {p['images']})" for p in rows) or 'Персонажей нет.')
+            name, _, description = args.partition('|')
+            if command == '/character' and (not name.strip() or len(name.strip()) > 100 or len(description) > 4000):
+                raise Conflict('Используйте /character Имя | Описание. Имя до 100 символов.')
+            image = await self.photo(message, 'references')
+            if command == '/reference':
+                if not image:
+                    raise Conflict('Прикрепите фото с подписью /reference Описание.')
+                s.reference(actor, image, args[:4000], project_id=project['id'])
+            else:
+                s.character(actor, name.strip(), description.strip(), image, project_id=project['id'])
+            return await self.client.send(peer, 'Сохранено. Генератор изображений по референсам пока не подключён.')
+        if command in ('/post', '/revise'):
+            return await self.generate(actor, peer, command, args, message)
+        if command == '/image':
+            job = s.job(actor, int(args))
+            s.expect_review(actor, job['id'], job['revision'])
+            path = await self.photo(message, 'images')
+            if not path:
+                raise Conflict('Прикрепите новое фото с подписью /image НОМЕР_ЗАДАНИЯ.')
+            s.replace_image(actor, job['id'], job['revision'], path)
+            return await self.preview(actor, peer, job['id'])
+        if command == '/jobs':
+            rows = s.jobs(actor)
+            return await self.client.send(peer, '\n'.join(f"№{j['id']}, версия {j['revision']}: {j['status']}" for j in rows) or 'Заданий нет.')
+        if command in ('/job', '/status'):
+            if command == '/job':
+                s.select_job(actor, int(args))
+            job = s.job(actor)
+            await self.client.send(peer, f"Задание №{job['id']}: {job['status']}" + ('\n' + job['remote_url'] if job['remote_url'] else ''))
+            if job['status'] == 'review':
+                await self.preview(actor, peer, job['id'])
+            return
+        await self.client.send(peer, 'Список команд: /help. Фото отправляйте с подписью /post Тема.')
+
+    async def generate(self, actor, peer, command, args, message):
+        if not args or len(args) > 12000:
+            raise Conflict('После команды укажите тему и тезисы либо замечания.')
+        s, ident = self.store, None
+        try:
+            project = s.project(actor)
+            previous, feedback, brief = '', '', args
+            if command == '/revise':
+                job, old = s.revise(actor)
+                ident, revision = job['id'], job['revision']
+                previous, feedback, brief = old['body'], args, job['brief']
+            else:
+                image = await self.photo(message, 'images')
+                ident, project = s.create_job(actor, brief, image, project_id=project['id'])
+                revision = 1
+            await self.client.send(peer, 'Готовлю текст. Без подтверждения пост не публикуется.')
+            context = '\n\n'.join(filter(None, [project['concept'], project['tone'], project['text_prompt']]))
+            body = await self.text_ai.generate(context, brief, previous, feedback)
+            s.save_version(actor, ident, revision, body, self.settings.demo)
+        except Exception:
+            if ident is not None:
+                s.finish(actor, ident, 'failed')
+            raise
+        await self.preview(actor, peer, ident)
+
+    async def action(self, actor, peer, payload):
+        action, ident, revision = payload['action'], int(payload['job']), int(payload['revision'])
+        s = self.store
+        job = s.expect_review(actor, ident, revision)
+        if action == 'cancel':
+            s.cancel(actor, ident, revision)
+            return await self.client.send(peer, 'Задание отменено.')
+        if action in ('edittext', 'editimage'):
+            s.select_job(actor, ident)
+            text = ('Отправьте /revise Ваши замечания — изменится только текст.' if action == 'edittext'
+                    else f'Прикрепите новое фото с подписью /image {ident}. Текст сохранится. Генерация изображений ИИ пока не подключена.')
+            return await self.client.send(peer, text)
+        if action != 'publish':
+            raise Conflict('Неизвестная кнопка.')
+        token = self.settings.vk_token_for(actor, job['project_id'])
+        if not token:
+            raise Conflict('Ключ публикации проекта не задан. Ключ сообщества бота для публикаций не используется.')
+        job, version = s.claim(actor, ident, revision)
+        try:
+            url = await self.publisher_factory(token).publish(job['target_group'], version['body'], version['image_path'], ident)
+        except AmbiguousPublish:
+            s.finish(actor, ident, 'unknown')
+            raise
+        except ProviderError:
+            s.finish(actor, ident, 'failed')
+            raise
+        except Exception:
+            s.finish(actor, ident, 'unknown')
+            raise ProviderError('Результат публикации неизвестен. Проверьте стену; повтора не будет.') from None
+        s.finish(actor, ident, 'published', url)
+        await self.client.send(peer, 'Опубликовано: ' + url)

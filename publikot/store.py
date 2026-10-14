@@ -35,6 +35,11 @@ class Store:
           path TEXT NOT NULL, description TEXT NOT NULL DEFAULT ''
         );
         CREATE TABLE IF NOT EXISTS schema_meta (name TEXT PRIMARY KEY);
+        CREATE TABLE IF NOT EXISTS inbox (
+          event_id TEXT PRIMARY KEY,
+          status TEXT NOT NULL CHECK(status IN ('processing','done','failed'))
+        );
+        CREATE TABLE IF NOT EXISTS transport_state (name TEXT PRIMARY KEY, value TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS sessions (
           owner INTEGER PRIMARY KEY, project_id INTEGER REFERENCES projects(id), job_id INTEGER
         );
@@ -67,6 +72,10 @@ class Store:
         for field in ('tone', 'text_prompt', 'image_prompt', 'visual_style'):
             if field not in columns:
                 self.db.execute(f"ALTER TABLE projects ADD COLUMN {field} TEXT NOT NULL DEFAULT ''")
+        version_columns = {r['name'] for r in self.db.execute('PRAGMA table_info(versions)')}
+        if 'image_path' not in version_columns:
+            self.db.execute('ALTER TABLE versions ADD COLUMN image_path TEXT')
+            self.db.execute('UPDATE versions SET image_path=(SELECT image_path FROM jobs WHERE jobs.id=versions.job_id)')
         with self.transaction():
             if not self.db.execute("SELECT 1 FROM schema_meta WHERE name='project_members_backfilled'").fetchone():
                 self.db.execute("INSERT OR IGNORE INTO project_members(project_id,user_id,role) SELECT id,owner,'member' FROM projects")
@@ -74,6 +83,20 @@ class Store:
         # Не повторяем внешние операции с неизвестным результатом после перезапуска.
         self.db.execute("UPDATE jobs SET status='unknown' WHERE status='publishing'")
         self.db.execute("UPDATE jobs SET status='failed' WHERE status='generating'")
+        self.db.execute("UPDATE inbox SET status='failed' WHERE status='processing'")
+
+    def begin_event(self, event_id):
+        return self.db.execute("INSERT OR IGNORE INTO inbox VALUES (?,'processing')", (event_id,)).rowcount == 1
+
+    def end_event(self, event_id, success):
+        self.db.execute('UPDATE inbox SET status=? WHERE event_id=?', ('done' if success else 'failed', event_id))
+
+    def cursor(self, group_id, value=None):
+        key = f'vk:{group_id}:ts'
+        if value is not None:
+            self.db.execute('INSERT INTO transport_state VALUES (?,?) ON CONFLICT(name) DO UPDATE SET value=excluded.value', (key, str(value)))
+        row = self.db.execute('SELECT value FROM transport_state WHERE name=?', (key,)).fetchone()
+        return row['value'] if row else None
 
     @contextmanager
     def transaction(self):
@@ -99,7 +122,7 @@ class Store:
         if actor != admin:
             raise Conflict('Эта команда доступна только администратору.')
         if user <= 0:
-            raise Conflict('Нужен положительный Telegram ID.')
+            raise Conflict('Нужен положительный числовой ID пользователя.')
         if user == admin:
             raise Conflict('Администратор всегда имеет доступ.')
         if allowed:
@@ -137,7 +160,7 @@ class Store:
         if actor != admin:
             raise Conflict('Назначать проекты может только администратор.')
         if user <= 0 or not self.db.execute('SELECT 1 FROM projects WHERE id=?', (project_id,)).fetchone():
-            raise Conflict('Проверьте номер проекта и Telegram ID участника.')
+            raise Conflict('Проверьте номер проекта и ID участника.')
         if allowed and not self.is_allowed(user, admin):
             raise Conflict('Сначала администратор должен разрешить этому пользователю доступ к боту.')
         with self.transaction():
@@ -217,7 +240,7 @@ class Store:
             self.require(owner, job['project_id'])
             if job['status'] != 'generating' or job['revision'] != revision:
                 raise Conflict('Задание уже изменилось.')
-            self.db.execute('INSERT INTO versions VALUES (?,?,?,?)', (ident, revision, body, int(demo)))
+            self.db.execute('INSERT INTO versions(job_id,revision,body,is_demo,image_path) VALUES (?,?,?,?,?)', (ident, revision, body, int(demo), job['image_path']))
             self.db.execute("UPDATE jobs SET status='review' WHERE id=?", (ident,))
 
     def revision(self, owner, ident):
@@ -233,6 +256,20 @@ class Store:
             previous = dict(self.revision(owner, job['id']))
             self.db.execute("UPDATE jobs SET revision=revision+1,status='generating' WHERE id=?", (job['id'],))
         return self.job(owner, job['id']), previous
+
+    def expect_review(self, actor, ident, revision):
+        job = self.job(actor, ident)
+        if job['status'] != 'review' or job['revision'] != revision:
+            raise Conflict('Эта кнопка устарела или задание уже обработано.')
+        return job
+
+    def replace_image(self, actor, ident, revision, path):
+        with self.transaction():
+            self.expect_review(actor, ident, revision)
+            old = self.revision(actor, ident)
+            next_revision = revision + 1
+            self.db.execute('INSERT INTO versions(job_id,revision,body,is_demo,image_path) VALUES (?,?,?,?,?)', (ident, next_revision, old['body'], old['is_demo'], path))
+            self.db.execute('UPDATE jobs SET revision=?,image_path=? WHERE id=?', (next_revision, path, ident))
 
     def claim(self, owner, ident, revision):
         with self.transaction():
