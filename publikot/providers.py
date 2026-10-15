@@ -11,6 +11,10 @@ class AmbiguousPublish(ProviderError):
     pass
 
 
+class PublishRejected(ProviderError):
+    """VK explicitly rejected the operation; no post was created."""
+
+
 class YandexText:
     def __init__(self, key, folder, demo):
         self.key, self.folder, self.demo = key, folder, demo
@@ -43,8 +47,9 @@ class YandexText:
 
 
 class VkPublisher:
-    def __init__(self, token):
+    def __init__(self, token, session_factory=None):
         self.token = token
+        self.session_factory = session_factory or aiohttp.ClientSession
 
     async def _call(self, session, method, **params):
         async with session.post('https://api.vk.com/method/' + method,
@@ -54,7 +59,8 @@ class VkPublisher:
             payload = await response.json()
             if 'error' in payload:
                 code = payload['error'].get('error_code', '?')
-                raise ProviderError(f'Ошибка API ВК, код {code}. Проверьте права ключа и сообщества.')
+                code = code if type(code) is int else 'неизвестен'
+                raise PublishRejected(f'ВК отклонил {method}, код API {code}. Проверьте права ключа и сообщества.')
             return payload['response']
 
     async def publish(self, group, body, image_path, ident):
@@ -62,7 +68,7 @@ class VkPublisher:
             raise ProviderError('Не задан VK_ACCESS_TOKEN.')
         wall_started = False
         try:
-            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=90)) as session:
+            async with self.session_factory(timeout=aiohttp.ClientTimeout(total=90)) as session:
                 attachment = ''
                 if image_path:
                     server = await self._call(session, 'photos.getWallUploadServer', group_id=group)
@@ -85,6 +91,8 @@ class VkPublisher:
                 result = await self._call(session, 'wall.post', owner_id=-group, from_group=1,
                                           message=body, attachments=attachment, guid=str(ident))
                 return f"https://vk.com/wall-{group}_{result['post_id']}"
+        except PublishRejected:
+            raise
         except ProviderError:
             if wall_started:
                 raise AmbiguousPublish('Результат публикации не подтверждён. Проверьте стену ВК; автоматического повтора не будет.') from None
