@@ -109,6 +109,7 @@ class PublishingFlowTests(unittest.IsolatedAsyncioTestCase):
 
     async def connect_and_compose(self):
         await self.send('/start')
+        await self.click('Мои сообщества')
         await self.click('Добавить сообщество')
         keys = self.messages.sent[-1]['keyboard']
         url = keys['buttons'][0][0]['action']['link']

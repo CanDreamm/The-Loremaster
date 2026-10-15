@@ -203,9 +203,15 @@ class Store:
             if image:
                 self.db.execute('INSERT INTO character_images(character_id,path) VALUES (?,?)', (row['id'], image))
 
-    def characters(self, owner):
-        project = self.project(owner)
+    def characters(self, owner, project_id=None):
+        project = self.require(owner, project_id) if project_id is not None else self.project(owner)
         return self.db.execute('SELECT c.*, (SELECT count(*) FROM character_images i WHERE i.character_id=c.id) AS images FROM characters c WHERE c.project_id=? ORDER BY c.id', (project['id'],)).fetchall()
+
+    def character_media(self, actor):
+        project = self.project(actor)
+        return self.db.execute('SELECT c.name,c.description,i.path FROM characters c '
+            'LEFT JOIN character_images i ON i.character_id=c.id WHERE c.project_id=? ORDER BY c.id,i.id',
+            (project['id'],)).fetchall()
 
     def select(self, owner, ident):
         self.require(owner, ident)

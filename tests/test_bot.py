@@ -71,9 +71,119 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
                         return await self.send(user=user, payload=json.loads(item['action']['payload']))
         self.fail(f'Button not found: {label}')
 
+    def labels(self):
+        return [item['action']['label'] for row in self.client.sent[-1]['keyboard']['buttons'] for item in row]
+
+    async def test_requested_menu_structure_and_back_navigation(self):
+        project = await self.setup_project()
+        await self.send('/menu')
+        self.assertEqual(self.labels(), ['Мои сообщества', 'Управление доступом', 'Помощь'])
+        await self.click('Управление доступом')
+        self.assertEqual(self.labels(), ['Разрешить доступ', 'Запретить доступ', 'Участники бота', 'Главное меню'])
+        await self.click('Главное меню')
+        await self.click('Мои сообщества')
+        self.assertIn('Добавить сообщество', self.labels())
+        await self.click(f'Бренд · №{project}')
+        self.assertEqual(self.labels(), ['Написать текст', 'Мои задания', 'Настройки проекта', 'Назад', 'Главное меню'])
+        await self.click('Настройки проекта')
+        self.assertEqual(self.labels(), ['Концепция', 'Тон общения', 'Правила для текста', 'Визуальный стиль',
+                                         'Референсы', 'Персонажи', 'Назад'])
+        await self.click('Назад')
+        self.assertIn('Настройки проекта', self.labels())
+        await self.click('Назад')
+        self.assertIn('Добавить сообщество', self.labels())
+
+    async def test_settings_show_current_value_and_cancel_without_writing(self):
+        project = await self.setup_project()
+        fields = [('Концепция', 'concept'), ('Тон общения', 'tone'),
+                  ('Правила для текста', 'text_prompt'), ('Визуальный стиль', 'visual_style')]
+        for label, field in fields:
+            with self.subTest(field=field):
+                self.store.configure(42, field, 'Сохранённое значение')
+                await self.send('/settings')
+                await self.click(label)
+                self.assertIn('Сохранённое значение', self.client.sent[-1]['text'])
+                self.assertEqual(self.labels(), ['Добавить', 'Назад'])
+                self.assertIsNone(self.store.dialog(42))
+                await self.click('Добавить')
+                self.assertEqual(self.store.dialog(42)['project'], project)
+                await self.click('Назад')
+                self.assertIsNone(self.store.dialog(42))
+                self.assertEqual(self.store.project(42)[field], 'Сохранённое значение')
+                await self.click('Добавить')
+                await self.send('Новое значение')
+                self.assertEqual(self.store.project(42)[field], 'Новое значение')
+                self.assertIn('Новое значение', self.client.sent[-1]['text'])
+                self.assertEqual(self.labels(), ['Добавить', 'Назад'])
+
+    async def test_image_settings_require_photo_and_show_saved_images(self):
+        await self.setup_project()
+        for label, kind in [('Референсы', 'reference'), ('Персонажи', 'character')]:
+            with self.subTest(kind=kind):
+                await self.send('/settings')
+                await self.click(label)
+                self.assertIn('Пока ничего не добавлено', self.client.sent[-1]['text'])
+                self.assertEqual(self.labels(), ['Добавить', 'Назад'])
+                await self.click('Добавить')
+                await self.send('Без изображения')
+                self.assertEqual(self.store.dialog(42)['kind'], kind)
+                self.assertEqual(self.store.references(42) if kind == 'reference' else self.store.characters(42), [])
+                previous = len(self.client.photos)
+                await self.send(photo=True)
+                self.assertIsNone(self.store.dialog(42))
+                rows = self.store.references(42) if kind == 'reference' else self.store.character_media(42)
+                self.assertEqual(len(rows), 1)
+                self.assertEqual(self.client.photos[previous:], [(42, rows[0]['path'])])
+                await self.click('Назад')
+                self.assertIn('Концепция', self.labels())
+                await self.click(label)
+                self.assertEqual(self.client.photos[-1], (42, rows[0]['path']))
+
+    async def test_character_images_are_project_scoped_and_paginated(self):
+        first = await self.setup_project()
+        for index in range(5):
+            self.store.character(42, 'Кот', 'Рыжий', f'/images/cat-{index}.jpg')
+        self.store.character(42, 'Без фото', 'Старый персонаж')
+        await self.send('/settings')
+        await self.click('Персонажи')
+        self.assertEqual(len(self.client.photos), 4)
+        await self.click('Далее')
+        self.assertEqual(len(self.client.photos), 5)
+        self.assertTrue(any('Старый персонаж' in message['text'] for message in self.client.sent))
+        second = self.store.create_project(42, 'Другой проект')
+        await self.send('/settings')
+        await self.click('Персонажи')
+        self.assertEqual(len(self.client.photos), 5)
+        self.assertIn('Пока ничего не добавлено', self.client.sent[-1]['text'])
+        await self.send('/allow 99')
+        await self.send(f'/assign {second} 99')
+        await self.send(user=99, payload={'action': 'menu', 'screen': 'characters', 'project': first})
+        self.assertEqual(len(self.client.photos), 5)
+
+    async def test_setting_input_stays_bound_to_original_project(self):
+        first = await self.setup_project()
+        await self.send('/settings')
+        await self.click('Визуальный стиль')
+        await self.click('Добавить')
+        second = self.store.create_project(42, 'Второй')
+        await self.send('Пастель')
+        self.assertEqual(self.store.require(42, first)['visual_style'], 'Пастель')
+        self.assertEqual(self.store.require(42, second)['visual_style'], '')
+
+    async def test_revoked_access_cannot_change_settings_or_upload_images(self):
+        project = await self.setup_project()
+        await self.send('/allow 99')
+        await self.send(f'/assign {project} 99')
+        await self.send(user=99, payload={'action': 'menu', 'screen': 'reference', 'project': project})
+        await self.send(f'/unassign {project} 99')
+        await self.send(user=99, photo=True)
+        self.assertEqual(self.store.references(42), [])
+        self.assertEqual(self.client.photos, [])
+
     async def test_menu_add_select_compose_and_revise_without_commands(self):
         await self.send('/start')
         self.enable_oauth()
+        await self.click('Мои сообщества')
         await self.click('Добавить сообщество')
         from urllib.parse import parse_qs, urlsplit
         url = self.client.sent[-1]['keyboard']['buttons'][0][0]['action']['link']
@@ -98,7 +208,7 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.store.job(42)['revision'], 2)
         self.assertEqual(self.store.revision(42, job['id'])['body'], 'Ещё короче')
         await self.click('Назад')
-        await self.click('Другие сообщества')
+        await self.click('Назад')
         await self.click(f"Моя кофейня · №{project['id']}")
         self.assertEqual(self.store.project(42)['id'], project['id'])
         self.publish.assert_not_awaited()
@@ -114,6 +224,7 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_add_requires_config_without_creating_empty_project(self):
         await self.send('/start')
+        await self.click('Мои сообщества')
         await self.click('Добавить сообщество')
         self.assertIn('Авторизация пока не настроена', self.client.sent[-1]['text'])
         self.assertEqual(self.store.projects(42), [])
@@ -123,6 +234,7 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
         self.enable_oauth()
         await self.send('/allow 99')
         await self.send('/start', user=99)
+        await self.click('Мои сообщества', user=99)
         await self.click('Добавить сообщество', user=99)
         self.assertIn('Выбрать сообщества ВК', str(self.client.sent[-1]['keyboard']))
         self.assertEqual(self.store.projects(99), [])
@@ -231,8 +343,10 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
     async def test_text_settings_menu_saves_plain_input(self):
         project = await self.setup_project()
         await self.send(f'/select {project}')
-        await self.click('Настройки текста')
+        await self.click('Настройки проекта')
         await self.click('Тон общения')
+        self.assertIsNone(self.store.dialog(42))
+        await self.click('Добавить')
         await self.send('Дружелюбный')
         self.assertEqual(self.store.project(42)['tone'], 'Дружелюбный')
         self.assertIsNone(self.store.dialog(42))
