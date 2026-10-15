@@ -35,7 +35,7 @@
       const response = await fetch(location.pathname, {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        credentials: 'omit',
+        credentials: 'same-origin',
         cache: 'no-store',
         redirect: 'error',
         body: JSON.stringify({state, access_token: denied ? '' : token,
@@ -43,6 +43,15 @@
       });
       // Render only the server's safe text, never the VK fragment or token.
       const text = await response.text();
+      if (response.status === 200 && response.headers?.get('Content-Type')?.startsWith('application/json')) {
+        const result = JSON.parse(text);
+        if (typeof result.selection_url !== 'string' ||
+            !/^\/oauth\/vk\/select\?state=[A-Za-z0-9_-]{32,128}$/.test(result.selection_url)) {
+          throw new Error('Invalid selection path');
+        }
+        location.replace(result.selection_url);
+        return;
+      }
       status.textContent = response.status === 200 || response.status === 400
         ? text : 'Сервер не завершил подключение. Запросите новую ссылку в боте.';
     } catch (_) {

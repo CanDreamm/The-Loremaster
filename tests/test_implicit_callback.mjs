@@ -9,7 +9,8 @@ const source = html.match(/<script nonce="__NONCE__">([\s\S]*?)<\/script>/)[1];
 async function runCallback(hash, search = '', fetcher) {
   const events = [];
   const status = {textContent: ''};
-  const location = {hash, search, pathname: '/oauth/vk/callback'};
+  const location = {hash, search, pathname: '/oauth/vk/callback',
+    replace(path) { events.push({kind: 'navigate', path}); }};
   const history = {replaceState(_, __, path) {
     events.push({kind: 'clean', path});
     location.hash = '';
@@ -33,7 +34,7 @@ test('fragment is removed before POST; token travels only in JSON body', async (
   assert.equal(events[1].path, '/oauth/vk/callback');
   assert.equal(events[1].options.method, 'POST');
   assert.equal(events[1].options.redirect, 'error');
-  assert.equal(events[1].options.credentials, 'omit');
+  assert.equal(events[1].options.credentials, 'same-origin');
   assert.deepEqual(JSON.parse(events[1].options.body), {
     state: 'one-use-state', access_token: 'private-key', expires_in: '3600', denied: false,
   });
@@ -69,4 +70,23 @@ test('API validation error is shown as plain text', async () => {
   const {status} = await runCallback('#access_token=private-key&state=s&expires_in=0', '',
     () => ({status: 400, text: async () => 'Проверка подключения ВК: account.getAppPermissions, код API 15.'}));
   assert.ok(status.textContent.includes('код API 15'));
+});
+
+test('community import navigates to the same-origin picker without credentials in URL', async () => {
+  const path = '/oauth/vk/select?state=' + 'a'.repeat(43);
+  const {events} = await runCallback('#access_token=private-key&state=s&expires_in=0', '', () => ({
+    status: 200, headers: {get: () => 'application/json; charset=utf-8'},
+    text: async () => JSON.stringify({selection_url: path})
+  }));
+  assert.deepEqual(events.at(-1), {kind: 'navigate', path});
+  assert.ok(!events.at(-1).path.includes('private-key'));
+});
+
+test('community import rejects external redirect targets', async () => {
+  const {events, status} = await runCallback('#access_token=private-key&state=s&expires_in=0', '', () => ({
+    status: 200, headers: {get: () => 'application/json'},
+    text: async () => JSON.stringify({selection_url: 'https://attacker.example'})
+  }));
+  assert.ok(!events.some(event => event.kind === 'navigate'));
+  assert.ok(status.textContent.includes('Не удалось'));
 });

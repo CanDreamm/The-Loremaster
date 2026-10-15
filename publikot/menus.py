@@ -27,8 +27,8 @@ class BotMenus:
     async def home(self, actor, peer):
         self.store.set_dialog(actor, None)
         rows = [[button('Мои сообщества', 'communities')]]
+        rows.append([button('Добавить сообщество', 'add')])
         if actor == self.settings.owner_id:
-            rows.append([button('Добавить сообщество', 'add')])
             rows.append([button('Управление доступом', 'admin')])
         rows.append([button('Помощь', 'help')])
         await self.client.send(peer, 'Публикот. Выберите сообщество, чтобы подготовить короткий текст.'
@@ -49,12 +49,10 @@ class BotMenus:
         if nav:
             rows.append(nav)
         footer = [button('Главное меню', 'home')]
-        if actor == self.settings.owner_id:
-            footer.insert(0, button('Добавить сообщество', 'add'))
+        footer.insert(0, button('Добавить сообщество', 'add'))
         rows.append(footer)
         await self.client.send(peer, (f'Мои сообщества · {page + 1}/{pages}. Выберите сообщество.' if projects
-                                    else 'Сообществ пока нет.' + (' Добавьте первое.' if actor == self.settings.owner_id
-                                                                  else ' Попросите администратора назначить вам проект.')),
+                                    else 'Сообществ пока нет. Нажмите «Добавить сообщество» или попросите администратора назначить проект.'),
                                keyboard=keyboard(*rows))
 
     async def workspace(self, actor, peer, project_id):
@@ -99,9 +97,7 @@ class BotMenus:
         if screen == 'communities':
             return await self.communities(actor, peer, int(payload.get('page', 0)))
         if screen == 'add':
-            if actor != self.settings.owner_id:
-                raise Conflict('Добавлять сообщества может администратор.')
-            return await self.prompt(actor, peer, {'kind': 'add_name'}, 'Как назвать сообщество в списке? До 100 символов.')
+            return await self.connect(actor, peer, None)
         if screen == 'admin':
             if actor != self.settings.owner_id:
                 raise Conflict('Это меню доступно только администратору.')
@@ -234,24 +230,19 @@ class BotMenus:
         if not state:
             return False
         kind = state['kind']
-        if kind in ('add_name', 'add_group', 'admin') and actor != self.settings.owner_id:
+        if kind in ('add_name', 'add_group'):
+            self.store.set_dialog(actor, None)
+            await self.connect(actor, peer, None)
+            return True
+        if kind == 'admin' and actor != self.settings.owner_id:
             raise Conflict('Это действие доступно только администратору.')
         project_id = state.get('project')
         if project_id:
             self.store.require(actor, project_id)
             if kind not in ('revise', 'image'):
                 self.store.select(actor, project_id)
-        if kind == 'add_name':
-            if not text or len(text) > 100:
-                raise Conflict('Название должно содержать от 1 до 100 символов. Попробуйте ещё раз.')
-            await self.prompt(actor, peer, {'kind': 'add_group', 'name': text},
-                              'Теперь отправьте ссылку или числовой ID сообщества ВК.')
-        elif kind in ('add_group', 'group'):
+        if kind == 'group':
             group = await self.group_id(text)
-            if kind == 'add_group':
-                # Resolve input before creating anything, so mistakes leave no empty projects.
-                project_id = self.store.create_project(actor, state['name'])
-                self.store.configure(actor, 'text_prompt', SHORT_PROMPT)
             self.store.configure(actor, 'vk_group', group)
             self.store.set_dialog(actor, None)
             await self.client.send(peer, 'Сообщество сохранено. Можно сразу готовить тексты. Для публикаций подключите ВК.',

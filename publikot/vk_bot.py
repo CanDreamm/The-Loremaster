@@ -264,9 +264,15 @@ class VkBot(BotMenus):
         await self.preview(actor, peer, ident)
 
     async def connect(self, actor, peer, project_id):
-        project = self.store.require(actor, project_id)
         if not self.oauth:
             raise Conflict('Авторизация пока не настроена администратором. Нужны приложение ВК и публичный HTTPS-адрес возврата.')
+        if project_id is None:
+            url = self.oauth.begin_import(actor)
+            return await self.client.send(peer, 'Войдите в ВК тем аккаунтом, из которого пишете боту, и разрешите доступ. '
+                'Затем выберите одно или несколько своих сообществ. Названия загрузятся из ВК автоматически. '
+                'Ссылка действует 10 минут.', keyboard=keyboard(
+                    [{'action': {'type': 'open_link', 'label': 'Выбрать сообщества ВК', 'link': url}}], back()))
+        project = self.store.require(actor, project_id)
         url = self.oauth.begin(actor, project_id)
         keys = keyboard([{'action': {'type': 'open_link', 'label': 'Авторизоваться в ВК', 'link': url}}],
                         [menu_button('Проверить подключение', 'connection', project=project_id)], back(project_id))

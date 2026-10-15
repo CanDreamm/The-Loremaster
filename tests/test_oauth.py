@@ -7,6 +7,7 @@ from dataclasses import replace
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 from unittest.mock import AsyncMock, MagicMock
+from aiohttp.test_utils import make_mocked_request
 
 from aiohttp.test_utils import TestClient, TestServer
 
@@ -286,7 +287,7 @@ class OAuthTests(unittest.IsolatedAsyncioTestCase):
             provider.api.reset_mock()
             await provider.validate('test-token', 42, 123,
                 {'access_token': 'test-token', 'user_id': identity, 'scope': 'vkid.personal_info wall photos'})
-            provider.api.assert_awaited_once_with('test-token', 'groups.getById', group_id=123)
+        provider.api.assert_awaited_once_with('test-token', 'groups.getById', group_id=123, fields='admin_level')
 
     async def test_vkid_rejects_wrong_identity_or_missing_scopes_before_api_calls(self):
         provider = VkOAuthProvider(self.settings, None)
@@ -322,3 +323,177 @@ class OAuthTests(unittest.IsolatedAsyncioTestCase):
         url = manager.begin(42, self.project)
         self.assertEqual(urlsplit(url).hostname, 'oauth.vk.com')
         self.assertNotIn('test-client-secret', url)
+
+
+class CommunityImportTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        await OAuthTests.asyncSetUp(self)
+        self.provider.validate_selected = AsyncMock()
+    asyncTearDown = OAuthTests.asyncTearDown
+    def import_state(self, actor=42):
+        url = self.manager.begin_import(actor)
+        scopes = parse_qs(urlsplit(url).query)['scope'][0]
+        self.assertIn('groups', scopes)
+        return parse_qs(urlsplit(url).query)['state'][0]
+
+    async def prepare(self, actor=42):
+        self.provider.communities = AsyncMock(return_value=[
+            {'id': 123, 'name': 'Бренд'}, {'id': 456, 'name': '<Кофе>'}])
+        state = self.import_state(actor)
+        row = await self.manager.prepare_import(state, 'code', 'device')
+        return state, row
+
+    async def test_multi_select_reuses_existing_project_and_preserves_settings(self):
+        self.store.configure(42, 'tone', 'Дружелюбный')
+        state, row = await self.prepare()
+        self.assertEqual(len(self.store.projects(42)), 1)
+        self.assertNotIn('private-user-test-token', row['token'])
+        actor, projects = await self.manager.finish_import(state, row['csrf'], [123, 456, 456])
+        self.assertEqual(actor, 42)
+        self.assertEqual(len(projects), 2)
+        self.assertEqual(projects[0], self.project)
+        self.assertEqual(self.store.require(42, self.project)['tone'], 'Дружелюбный')
+        self.assertEqual(self.manager.token_for(42, projects[1], 456), 'private-user-test-token')
+        self.assertEqual(self.store.require(42, projects[1])['name'], '<Кофе>')
+        saved = self.store.db.execute('SELECT * FROM oauth_imports').fetchone()
+        self.assertEqual((saved['status'], saved['token'], saved['verifier'], saved['csrf']), ('done', '', '', ''))
+        with self.assertRaises(Conflict):
+            await self.manager.finish_import(state, row['csrf'], [456])
+
+    async def test_invalid_selection_and_csrf_do_not_write_connections(self):
+        state, row = await self.prepare()
+        for csrf, selection in [('bad-csrf', [123]), (row['csrf'], []), (row['csrf'], [999])]:
+            with self.assertRaises(Conflict):
+                await self.manager.finish_import(state, csrf, selection)
+        self.assertFalse(self.manager.has_connection(self.project))
+        self.assertEqual(len(self.store.projects(42)), 1)
+        await self.manager.finish_import(state, row['csrf'], [456])
+
+    async def test_permission_loss_is_atomic_for_all_selected_communities(self):
+        state, row = await self.prepare()
+        self.provider.validate_selected.side_effect = ProviderError('Права отозваны')
+        with self.assertRaises(ProviderError):
+            await self.manager.finish_import(state, row['csrf'], [123, 456])
+        self.assertFalse(self.manager.has_connection(self.project))
+        self.assertEqual(len(self.store.projects(42)), 1)
+        self.assertEqual(self.store.db.execute('SELECT token FROM oauth_imports').fetchone()['token'], '')
+
+    async def test_revoked_bot_access_cannot_save_selection(self):
+        self.store.set_access(42, 99, True, 42)
+        state, row = await self.prepare(99)
+        self.store.set_access(42, 99, False, 42)
+        with self.assertRaises(Conflict):
+            await self.manager.finish_import(state, row['csrf'], [456])
+        self.assertEqual(self.store.projects(99), [])
+
+    async def test_expired_picker_wipes_credentials(self):
+        state, row = await self.prepare()
+        self.clock[0] += 601
+        with self.assertRaises(Conflict):
+            await self.manager.finish_import(state, row['csrf'], [456])
+        # Expiry cleanup must persist even when the operation is rejected.
+        self.assertFalse(self.manager.has_connection(self.project))
+        self.assertEqual(self.store.db.execute('SELECT token FROM oauth_imports').fetchone()['token'], '')
+
+    async def test_new_link_during_save_prevents_old_import(self):
+        state, row = await self.prepare()
+        async def renew(*args):
+            self.manager.begin_import(42)
+        self.provider.validate_selected.side_effect = renew
+        with self.assertRaises(Conflict):
+            await self.manager.finish_import(state, row['csrf'], [456])
+        self.assertEqual(len(self.store.projects(42)), 1)
+
+    async def test_denial_and_empty_group_list_create_no_projects(self):
+        state = self.import_state()
+        with self.assertRaises(Conflict):
+            await self.manager.prepare_import(state, '', denied=True)
+        self.provider.exchange.assert_not_awaited()
+        self.provider.communities = AsyncMock(return_value=[])
+        state = self.import_state()
+        with self.assertRaises(Conflict):
+            await self.manager.prepare_import(state, 'code', 'device')
+        self.assertEqual(len(self.store.projects(42)), 1)
+
+    async def test_provider_paginates_and_excludes_moderators(self):
+        provider = VkOAuthProvider(replace(self.settings, oauth_provider='vk_api'), None)
+        provider.api = AsyncMock(side_effect=[{'id': 42}, 8196,
+            {'count': 3, 'items': [{'id': 123, 'name': 'А', 'is_admin': 1, 'admin_level': 3},
+                                   {'id': 999, 'name': 'Модератор', 'is_admin': 1, 'admin_level': 1}]},
+            {'count': 3, 'items': [{'id': 456, 'name': 'Б', 'is_admin': 1, 'admin_level': 2}]}])
+        groups = await provider.communities('test-token', 42)
+        self.assertEqual([g['id'] for g in groups], [123, 456])
+        self.assertEqual(provider.api.call_args.kwargs['offset'], 2)
+
+    async def test_vkid_import_preserves_identity_and_scopes_until_selection(self):
+        self.provider.communities = VkOAuthProvider.communities.__get__(self.provider)
+        self.provider.validate_selected = VkOAuthProvider.validate_selected.__get__(self.provider)
+        self.provider.api = AsyncMock(side_effect=[
+            {'count': 1, 'items': [{'id': 456, 'name': 'Бренд', 'is_admin': 1, 'admin_level': 3}]},
+            {'groups': [{'id': 456, 'is_admin': 1, 'admin_level': 3}]}])
+        state = self.import_state()
+        row = await self.manager.prepare_import(state, 'code', 'device')
+        await self.manager.finish_import(state, row['csrf'], [456])
+        self.assertEqual([call.args[1] for call in self.provider.api.await_args_list],
+                         ['groups.get', 'groups.getById'])
+
+    async def test_provider_rechecks_all_selected_groups_in_one_batch(self):
+        provider = VkOAuthProvider(replace(self.settings, oauth_provider='vk_api'), None)
+        provider.api = AsyncMock(side_effect=[{'id': 42}, 8196,
+            {'groups': [{'id': 123, 'is_admin': 1, 'admin_level': 3},
+                        {'id': 456, 'is_admin': 1, 'admin_level': 2}]}])
+        await provider.validate_selected('test-token', 42, [123, 456])
+        self.assertEqual(provider.api.await_count, 3)
+        self.assertEqual(provider.api.call_args.kwargs['group_ids'], '123,456')
+        provider.api = AsyncMock(side_effect=[{'id': 42}, 8196,
+            {'groups': [{'id': 123, 'is_admin': 1, 'admin_level': 3}]}])
+        with self.assertRaises(ProviderError):
+            await provider.validate_selected('test-token', 42, [123, 456])
+
+    async def test_repeat_import_does_not_duplicate_project(self):
+        for _ in range(2):
+            state, row = await self.prepare()
+            await self.manager.finish_import(state, row['csrf'], [456])
+        self.assertEqual(len(self.store.projects(42)), 2)
+
+    async def test_duplicate_post_during_validation_cannot_save_twice(self):
+        state, row = await self.prepare()
+        entered, release = asyncio.Event(), asyncio.Event()
+        async def validate(*args):
+            entered.set()
+            await release.wait()
+        self.provider.validate_selected.side_effect = validate
+        first = asyncio.create_task(self.manager.finish_import(state, row['csrf'], [456]))
+        await entered.wait()
+        try:
+            with self.assertRaises(Conflict):
+                await self.manager.finish_import(state, row['csrf'], [456])
+        finally:
+            release.set()
+            await first
+        self.provider.validate_selected.assert_awaited_once()
+        self.assertEqual(len(self.store.projects(42)), 2)
+
+    async def test_http_picker_escapes_names_requires_cookie_and_notifies(self):
+        self.provider.communities = AsyncMock(return_value=[{'id': 456, 'name': '<script>bad</script>'}])
+        state = self.import_state()
+        notify = AsyncMock()
+        app = create_web_app(self.manager, notify)
+        callback = next(r.handler for r in app.router.routes() if r.method == 'GET')
+        response = await callback(make_mocked_request('GET', '/oauth/vk/callback?' +
+            'state=' + state + '&code=private-code&device_id=device'))
+        self.assertEqual(response.status, 200)
+        self.assertIn('&lt;script&gt;', response.text)
+        self.assertNotIn('private-user-test-token', response.text)
+        self.assertNotIn('private-code', response.text)
+        self.assertTrue(response.cookies['vk_import']['secure'])
+        row = self.manager.import_session(state, 'choosing')
+        from multidict import MultiDict
+        post = next(r.handler for r in app.router.routes() if r.method == 'POST' and r.resource.canonical == '/oauth/vk/select')
+        request = make_mocked_request('POST', '/oauth/vk/select')
+        request._post = MultiDict([('state', state), ('csrf', row['csrf']), ('group', '456')])
+        self.assertEqual((await post(request)).status, 400)
+        request = make_mocked_request('POST', '/oauth/vk/select', headers={'Cookie': 'vk_import=' + row['csrf']})
+        request._post = MultiDict([('state', state), ('csrf', row['csrf']), ('group', '456')])
+        self.assertEqual((await post(request)).status, 200)
+        notify.assert_awaited_once()

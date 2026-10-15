@@ -6,7 +6,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 from publikot.providers import AmbiguousPublish
-from publikot.oauth import OAuthManager
+from publikot.oauth import OAuthManager, VkOAuthProvider
 from publikot.settings import Settings
 from publikot.store import Store
 from publikot.vk_bot import VkBot
@@ -73,10 +73,15 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_menu_add_select_compose_and_revise_without_commands(self):
         await self.send('/start')
+        self.enable_oauth()
         await self.click('Добавить сообщество')
-        await self.send('Моя кофейня')
-        await self.send('https://vk.ru/club123')
+        from urllib.parse import parse_qs, urlsplit
+        url = self.client.sent[-1]['keyboard']['buttons'][0][0]['action']['link']
+        state = parse_qs(urlsplit(url).query)['state'][0]
+        row = await self.app.oauth.prepare_import(state, 'code', 'device')
+        await self.app.oauth.finish_import(state, row['csrf'], [123])
         project = self.store.project(42)
+        await self.send(payload={'action': 'menu', 'screen': 'workspace', 'project': project['id']})
         self.assertEqual(project['vk_group'], 123)
         self.assertIn('500', project['text_prompt'])
         self.assertEqual(len(self.store.projects(42)), 1)
@@ -98,27 +103,40 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.store.project(42)['id'], project['id'])
         self.publish.assert_not_awaited()
 
-    async def test_add_wizard_invalid_group_can_be_retried_without_empty_projects(self):
-        await self.send('/start')
-        await self.click('Добавить сообщество')
-        await self.send('Кофейня')
-        await self.send('https://other.example.com/club123')
-        self.assertEqual(self.store.projects(42), [])
-        self.assertEqual(self.store.dialog(42)['kind'], 'add_group')
-        await self.send('123')
-        self.assertEqual(self.store.project(42)['vk_group'], 123)
+    def enable_oauth(self):
+        settings = replace(self.settings, oauth_client_id='123', oauth_public_url='https://bot.example.com')
+        provider = VkOAuthProvider(settings, None)
+        provider.exchange = AsyncMock(return_value={'access_token': 'private-test-token'})
+        provider.communities = AsyncMock(return_value=[{'id': 123, 'name': 'Моя кофейня'}])
+        provider.validate = AsyncMock()
+        provider.validate_selected = AsyncMock()
+        self.app.oauth = OAuthManager(settings, self.store, provider)
 
-    async def test_add_wizard_resolves_short_name_and_rejects_personal_profile(self):
-        self.client.api = AsyncMock(return_value={'type': 'user', 'object_id': 99})
+    async def test_add_requires_config_without_creating_empty_project(self):
         await self.send('/start')
         await self.click('Добавить сообщество')
-        await self.send('Кофейня')
-        await self.send('https://vk.com/mycoffee')
+        self.assertIn('Авторизация пока не настроена', self.client.sent[-1]['text'])
         self.assertEqual(self.store.projects(42), [])
-        self.client.api.return_value = {'type': 'group', 'object_id': 123}
+        self.assertIsNone(self.store.dialog(42))
+
+    async def test_allowed_member_can_open_own_community_picker(self):
+        self.enable_oauth()
+        await self.send('/allow 99')
+        await self.send('/start', user=99)
+        await self.click('Добавить сообщество', user=99)
+        self.assertIn('Выбрать сообщества ВК', str(self.client.sent[-1]['keyboard']))
+        self.assertEqual(self.store.projects(99), [])
+
+    async def test_change_group_resolves_short_name_and_rejects_profile(self):
+        project = await self.setup_project()
+        self.client.api = AsyncMock(return_value={'type': 'user', 'object_id': 99})
+        await self.send(payload={'action': 'menu', 'screen': 'group', 'project': project})
+        await self.send('https://vk.com/mycoffee')
+        self.assertEqual(self.store.project(42)['vk_group'], 123)
+        self.client.api.return_value = {'type': 'group', 'object_id': 456}
         await self.send('https://vk.com/mycoffee')
         self.client.api.assert_awaited_with('utils.resolveScreenName', screen_name='mycoffee')
-        self.assertEqual(self.store.project(42)['vk_group'], 123)
+        self.assertEqual(self.store.project(42)['vk_group'], 456)
 
     async def test_home_cancels_prompt_and_plain_text_does_not_start_generation(self):
         project = await self.setup_project()

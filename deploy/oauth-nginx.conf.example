@@ -5,7 +5,7 @@ server {
     ssl_certificate /etc/letsencrypt/live/bot.itiscat.ru/fullchain.pem;
     ssl_certificate_key /etc/letsencrypt/live/bot.itiscat.ru/privkey.pem;
 
-    location = /oauth/vk/callback {
+    location /oauth/vk/ {
         # Query содержит одноразовые code/state. Не журналировать запрос.
         access_log off;
         error_log /dev/null;
