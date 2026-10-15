@@ -42,6 +42,8 @@ class VkBot(BotMenus):
         self.text_ai = text_ai or YandexText(settings.yandex_key, settings.yandex_folder, settings.demo)
         self.publisher_factory = publisher_factory
         self.oauth = oauth
+        if hasattr(client, 'bind_store'):
+            client.bind_store(store)
 
     async def handle(self, event):
         if event.get('type') != 'message_new' or event.get('group_id') != self.settings.group_id:
@@ -69,7 +71,14 @@ class VkBot(BotMenus):
                     payload = json.loads(message['payload'])
                     if not isinstance(payload, dict):
                         raise ValueError
+                    previous = self.client.tracked_messages(peer) if hasattr(self.client, 'tracked_messages') else []
                     await self.action(actor, peer, payload)
+                    if previous:
+                        try:
+                            await self.client.delete_messages(peer, previous)
+                        except ProviderError as error:
+                            # The action already succeeded; cleanup must not repeat it.
+                            print(f'Предыдущие сообщения не удалены: {error}', flush=True)
                 except (ValueError, TypeError, KeyError):
                     await self.client.send(peer, 'Кнопка некорректна. Откройте /status заново.')
             else:

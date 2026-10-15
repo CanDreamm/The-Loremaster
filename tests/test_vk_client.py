@@ -1,8 +1,12 @@
 import unittest
+import tempfile
+from pathlib import Path
+from unittest.mock import AsyncMock
 
 from publikot.__main__ import advance_server, event_failure
 from publikot.providers import ProviderError
 from publikot.vk_client import VkApiError, VkMessages, trusted_vk_url
+from publikot.store import Store
 
 
 class Response:
@@ -31,6 +35,19 @@ class Session:
 
 
 class VkClientTests(unittest.IsolatedAsyncioTestCase):
+    async def test_successful_chunks_are_tracked_even_if_later_send_fails(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = Store(Path(directory) / 'test.sqlite3')
+            try:
+                client = VkMessages('private-key', 123, None)
+                client.bind_store(store)
+                client.api = AsyncMock(side_effect=[11, ProviderError('Нет связи')])
+                with self.assertRaises(ProviderError):
+                    await client.send(42, 'x' * 4000)
+                self.assertEqual(store.bot_message_ids(123, 42), [11])
+            finally:
+                store.db.close()
+
     async def test_api_key_is_sent_in_body_not_url(self):
         session = Session({'response': 123})
         client = VkMessages('private-key', 242305804, session)

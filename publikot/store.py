@@ -47,6 +47,10 @@ class Store:
         CREATE TABLE IF NOT EXISTS ui_dialogs (
           actor INTEGER PRIMARY KEY, state TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS bot_messages (
+          group_id INTEGER NOT NULL, peer_id INTEGER NOT NULL, message_id INTEGER NOT NULL,
+          PRIMARY KEY(group_id,peer_id,message_id)
+        );
         CREATE TABLE IF NOT EXISTS jobs (
           id INTEGER PRIMARY KEY, owner INTEGER NOT NULL, project_id INTEGER NOT NULL REFERENCES projects(id),
           brief TEXT NOT NULL, image_path TEXT, revision INTEGER NOT NULL DEFAULT 1,
@@ -105,6 +109,18 @@ class Store:
 
     def end_event(self, event_id, success):
         self.db.execute('UPDATE inbox SET status=? WHERE event_id=?', ('done' if success else 'failed', event_id))
+
+    def remember_bot_message(self, group_id, peer_id, message_id):
+        if type(message_id) is int and message_id > 0:
+            self.db.execute('INSERT OR IGNORE INTO bot_messages VALUES (?,?,?)', (group_id, peer_id, message_id))
+
+    def bot_message_ids(self, group_id, peer_id):
+        return [row['message_id'] for row in self.db.execute(
+            'SELECT message_id FROM bot_messages WHERE group_id=? AND peer_id=? ORDER BY message_id', (group_id, peer_id))]
+
+    def forget_bot_messages(self, group_id, peer_id, message_ids):
+        self.db.executemany('DELETE FROM bot_messages WHERE group_id=? AND peer_id=? AND message_id=?',
+                            [(group_id, peer_id, ident) for ident in message_ids])
 
     def cursor(self, group_id, value=None):
         key = f'vk:{group_id}:ts'

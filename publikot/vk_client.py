@@ -38,6 +38,36 @@ def trusted_vk_url(value):
 class VkMessages:
     def __init__(self, token, group_id, session):
         self.token, self.group_id, self.session = token, group_id, session
+        self.message_store = None
+
+    def bind_store(self, store):
+        self.message_store = store
+
+    def tracked_messages(self, peer):
+        return self.message_store.bot_message_ids(self.group_id, peer) if self.message_store else []
+
+    async def delete_messages(self, peer, message_ids):
+        # Only IDs returned by our own sends in this conversation are eligible.
+        known = set(self.tracked_messages(peer))
+        selected = sorted(set(message_ids) & known)
+        unconfirmed = False
+        for offset in range(0, len(selected), 100):
+            batch = selected[offset:offset + 100]
+            result = await self.api('messages.delete', peer_id=peer,
+                                    message_ids=','.join(map(str, batch)), delete_for_all=1)
+            if isinstance(result, dict):
+                deleted = [ident for ident in batch if result.get(str(ident)) == 1]
+            elif isinstance(result, list):
+                deleted = [item['message_id'] for item in result if isinstance(item, dict)
+                           and item.get('peer_id', peer) == peer and item.get('message_id') in batch
+                           and item.get('response') == 1 and not item.get('error')]
+            else:
+                deleted = []
+            self.message_store.forget_bot_messages(self.group_id, peer, deleted)
+            if set(deleted) != set(batch):
+                unconfirmed = True
+        if unconfirmed:
+            raise ProviderError('ВК не подтвердил удаление части предыдущих сообщений (messages.delete).')
 
     async def api(self, method, **params):
         try:
@@ -75,6 +105,7 @@ class VkMessages:
 
     async def send(self, peer, text, keyboard=None, attachment=None):
         chunks = [text[i:i+3500] for i in range(0, len(text), 3500)] or [' ']
+        message_ids = []
         for index, chunk in enumerate(chunks):
             params = {'peer_id': peer, 'message': chunk, 'random_id': secrets.randbelow(2**31-1)+1}
             if index == len(chunks)-1:
@@ -83,7 +114,7 @@ class VkMessages:
                 if attachment:
                     params['attachment'] = attachment
             try:
-                await self.api('messages.send', **params)
+                ident = await self.api('messages.send', **params)
             except VkApiError as error:
                 if error.code != 912 or 'keyboard' not in params:
                     raise
@@ -93,7 +124,12 @@ class VkMessages:
                 params['message'] = (chunk + '\n\nВК отклонил кнопки (API 912). В управлении '
                     'сообществом откройте «Сообщения» → «Настройки для бота» и включите '
                     '«Возможности ботов». Затем отправьте /start заново. Команды: /help.')
-                await self.api('messages.send', **params)
+                ident = await self.api('messages.send', **params)
+            if type(ident) is int and ident > 0:
+                message_ids.append(ident)
+                if self.message_store:
+                    self.message_store.remember_bot_message(self.group_id, peer, ident)
+        return message_ids
 
     async def download(self, url, target):
         if not trusted_vk_url(url):
@@ -134,4 +170,4 @@ class VkMessages:
         attachment = f"photo{photo['owner_id']}_{photo['id']}"
         if photo.get('access_key'):
             attachment += '_' + photo['access_key']
-        await self.send(peer, caption or 'Изображение', attachment=attachment)
+        return await self.send(peer, caption or 'Изображение', attachment=attachment)
