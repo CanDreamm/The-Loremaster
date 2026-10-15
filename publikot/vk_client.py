@@ -90,6 +90,31 @@ class VkMessages:
             raise ProviderError('ВК вернул неожиданный адрес Long Poll.')
         return result
 
+    async def enable_callback_events(self):
+        current = await self.api('groups.getLongPollSettings', group_id=self.group_id)
+        if not isinstance(current, dict) or not isinstance(current.get('events'), dict):
+            raise ProviderError('Не удалось проверить настройки Long Poll для callback-кнопок.')
+        events = current['events']
+        version = current.get('api_version', '')
+        try:
+            supported = tuple(map(int, version.split('.'))) >= (5, 120)
+        except (AttributeError, ValueError):
+            supported = False
+        if current.get('enabled') == 1 and events.get('message_new') == 1 and events.get('message_event') == 1 and supported:
+            return
+        # Preserve existing subscriptions when enabling the two events this bot consumes.
+        params = {name: int(value) for name, value in events.items()
+                  if isinstance(name, str) and re.fullmatch(r'[a-z][a-z_]*', name) and name not in ('group_id', 'enabled', 'api_version')
+                  and type(value) in (int, bool) and value in (0, 1)}
+        params.update(group_id=self.group_id, enabled=1, api_version=version if supported else '5.199',
+                      message_new=1, message_event=1)
+        result = await self.api('groups.setLongPollSettings', **params)
+        if result != 1:
+            raise ProviderError('ВК не подтвердил включение callback-кнопок в Long Poll.')
+
+    async def answer_event(self, actor, peer, event_id):
+        return await self.api('messages.sendMessageEventAnswer', event_id=event_id, user_id=actor, peer_id=peer)
+
     async def poll(self, server):
         if not trusted_vk_url(server['server']):
             raise ProviderError('Недопустимый адрес Long Poll.')

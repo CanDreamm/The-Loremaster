@@ -4,7 +4,8 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
+from types import SimpleNamespace
 
 from publikot.settings import Settings
 from publikot.store import Store
@@ -19,11 +20,14 @@ class MenuCleanupTests(unittest.IsolatedAsyncioTestCase):
         self.store = Store(self.settings.database)
         self.project = self.store.create_project(42, 'Кофейня')
         self.client = VkMessages('test-key', 123, None)
-        self.sent, self.deleted = [], []
+        self.sent, self.deleted, self.answers = [], [], []
         self.next_id, self.event_id = 100, 1000
         self.reject_delete = False
 
         async def api(method, **params):
+            if method == 'messages.sendMessageEventAnswer':
+                self.answers.append(params)
+                return 1
             if method == 'messages.send':
                 self.next_id += 1
                 self.sent.append({**params, 'id': self.next_id})
@@ -55,6 +59,95 @@ class MenuCleanupTests(unittest.IsolatedAsyncioTestCase):
                  'object': {'message': message}}
         await self.bot.handle(event)
         return event
+
+    async def click(self, payload, actor=42, peer=42, event_id=None):
+        self.event_id += 1
+        event = {'type': 'message_event', 'group_id': 123, 'object': {
+            'event_id': event_id or str(self.event_id), 'user_id': actor, 'peer_id': peer,
+            'conversation_message_id': 7, 'payload': payload}}
+        await self.bot.handle(event)
+        return event
+
+    async def test_start_and_callback_navigation_without_incoming_text(self):
+        await self.send('/start')
+        source = self.sent[-1]['id']
+        keys = json.loads(self.sent[-1]['keyboard'])
+        first = keys['buttons'][0][0]['action']
+        self.assertEqual(first['type'], 'callback')
+        await self.click(json.loads(first['payload']))
+        self.assertEqual(len(self.answers), 1)
+        self.assertEqual(self.deleted[-1]['message_ids'], str(source))
+        self.assertIn('сообществ', self.sent[-1]['message'].lower())
+        self.assertEqual(self.store.db.execute('SELECT count(*) FROM inbox').fetchone()[0], 2)
+
+    async def test_callback_starts_input_and_regular_text_saves_setting(self):
+        await self.click({'action': 'menu', 'screen': 'field_add', 'project': self.project, 'field': 'tone'})
+        self.assertEqual(self.store.dialog(42)['kind'], 'field')
+        await self.send('Дружелюбный')
+        self.assertEqual(self.store.project(42)['tone'], 'Дружелюбный')
+        self.assertIsNone(self.store.dialog(42))
+        await self.click({'action': 'menu', 'screen': 'settings', 'project': self.project})
+        self.assertIn('Настройки проекта', self.sent[-1]['message'])
+
+    async def test_duplicate_callback_does_not_publish_twice(self):
+        self.store.configure(42, 'vk_group', 456)
+        ident, _ = self.store.create_job(42, 'Пост')
+        self.store.save_version(42, ident, 1, 'Готовый текст', False)
+        publish = AsyncMock(return_value='https://vk.com/wall-456_1')
+        self.bot.publisher_factory = lambda token: SimpleNamespace(publish=publish)
+        with patch.dict('os.environ', {f'VK_ACCESS_TOKEN_PROJECT_{self.project}': 'test-publishing-key'}):
+            event = await self.click({'action': 'publish', 'job': ident, 'revision': 1})
+            await self.bot.handle(event)
+        publish.assert_awaited_once()
+        self.assertEqual(len(self.answers), 2)
+        self.assertEqual(self.store.job(42, ident)['status'], 'published')
+
+    async def test_callback_acknowledgement_is_before_action(self):
+        await self.click({'action': 'menu', 'screen': 'home'})
+        self.assertEqual(self.client.api.await_args_list[0].args[0], 'messages.sendMessageEventAnswer')
+        self.assertEqual(self.client.api.await_args_list[1].args[0], 'messages.send')
+
+    async def test_callback_rechecks_access_and_rejects_group_chats(self):
+        payload = {'action': 'menu', 'screen': 'compose', 'project': self.project}
+        await self.click(payload, actor=99, peer=99)
+        self.assertIn('Доступ к боту отозван', self.sent[-1]['message'])
+        self.assertIsNone(self.store.dialog(99))
+        count = len(self.sent)
+        await self.click(payload, actor=42, peer=2000000001)
+        self.assertEqual(len(self.sent), count)
+        self.assertIsNone(self.store.dialog(42))
+        self.store.set_access(42, 99, True, 42)
+        await self.click(payload, actor=99, peer=99)
+        self.assertIn('Нет доступа к проекту', self.sent[-1]['message'])
+
+    async def test_callback_deduplication_survives_restart(self):
+        event = await self.click({'action': 'menu', 'screen': 'home'})
+        count = len(self.sent)
+        self.store.db.close()
+        self.store = Store(self.settings.database)
+        self.bot = VkBot(self.settings, self.store, self.client)
+        await self.bot.handle(event)
+        self.assertEqual(len(self.sent), count)
+        self.assertEqual(len(self.answers), 2)
+
+    async def test_callback_ack_failure_does_not_block_navigation(self):
+        original = self.client.api.side_effect
+        async def api(method, **params):
+            if method == 'messages.sendMessageEventAnswer':
+                raise VkApiError(method, 100)
+            return await original(method, **params)
+        self.client.api.side_effect = api
+        with contextlib.redirect_stdout(io.StringIO()):
+            await self.click({'action': 'menu', 'screen': 'home'})
+        self.assertIn('Публикот', self.sent[-1]['message'])
+
+    async def test_malformed_callback_preserves_previous_screen(self):
+        await self.send('/start')
+        original = self.sent[-1]['id']
+        await self.click(['not-an-action'])
+        self.assertIn('Кнопка некорректна', self.sent[-1]['message'])
+        self.assertEqual(self.deleted, [])
+        self.assertIn(original, self.client.tracked_messages(42))
 
     async def test_button_deletes_previous_bot_messages_for_both_participants(self):
         await self.send('/menu')

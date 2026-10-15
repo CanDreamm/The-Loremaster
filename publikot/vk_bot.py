@@ -27,7 +27,7 @@ ADMIN_HELP = '\nАдминистратор: /new Название, /allow ID, /d
 def preview_keyboard(job, is_demo=False):
     def button(label, action, color='secondary'):
         payload = json.dumps({'action': action, 'job': job['id'], 'revision': job['revision']})
-        return {'action': {'type': 'text', 'label': label, 'payload': payload}, 'color': color}
+        return {'action': {'type': 'callback', 'label': label, 'payload': payload}, 'color': color}
     rows = [[button('Изменить текст', 'edittext'),
              button('Заменить фото' if job['image_path'] else 'Добавить фото', 'editimage')]]
     rows.append(([button('Опубликовать', 'publish', 'positive')] if not is_demo and job['target_group'] else [])
@@ -46,7 +46,11 @@ class VkBot(BotMenus):
             client.bind_store(store)
 
     async def handle(self, event):
-        if event.get('type') != 'message_new' or event.get('group_id') != self.settings.group_id:
+        if event.get('group_id') != self.settings.group_id:
+            return
+        if event.get('type') == 'message_event':
+            return await self.callback(event)
+        if event.get('type') != 'message_new':
             return
         message = event.get('object', {}).get('message', {})
         actor, peer = message.get('from_id', 0), message.get('peer_id', 0)
@@ -71,14 +75,7 @@ class VkBot(BotMenus):
                     payload = json.loads(message['payload'])
                     if not isinstance(payload, dict):
                         raise ValueError
-                    previous = self.client.tracked_messages(peer) if hasattr(self.client, 'tracked_messages') else []
-                    await self.action(actor, peer, payload)
-                    if previous:
-                        try:
-                            await self.client.delete_messages(peer, previous)
-                        except ProviderError as error:
-                            # The action already succeeded; cleanup must not repeat it.
-                            print(f'Предыдущие сообщения не удалены: {error}', flush=True)
+                    await self.button_action(actor, peer, payload)
                 except (ValueError, TypeError, KeyError):
                     await self.client.send(peer, 'Кнопка некорректна. Откройте /status заново.')
             else:
@@ -98,6 +95,52 @@ class VkBot(BotMenus):
             self.store.end_event(key, False)
             raise
         self.store.end_event(key, True)
+
+    async def button_action(self, actor, peer, payload):
+        previous = self.client.tracked_messages(peer) if hasattr(self.client, 'tracked_messages') else []
+        await self.action(actor, peer, payload)
+        if previous:
+            try:
+                await self.client.delete_messages(peer, previous)
+            except ProviderError as error:
+                # The action already succeeded; cleanup must not repeat it.
+                print(f'Предыдущие сообщения не удалены: {error}', flush=True)
+
+    async def callback(self, event):
+        data = event.get('object', {})
+        if not isinstance(data, dict):
+            return
+        actor, peer, event_id = data.get('user_id'), data.get('peer_id'), data.get('event_id')
+        if type(actor) is not int or actor <= 0 or type(peer) is not int or peer != actor or not isinstance(event_id, str) or not 1 <= len(event_id) <= 256:
+            return
+        key = f'{self.settings.group_id}:callback:{peer}:{event_id}'
+        fresh = self.store.begin_event(key)
+        try:
+            # Acknowledge before slow generation; retries acknowledge without repeating actions.
+            try:
+                await self.client.answer_event(actor, peer, event_id)
+            except ProviderError as error:
+                print(f'Ответ на callback-кнопку не отправлен: {error}', flush=True)
+            if not fresh:
+                return
+            if not self.store.is_allowed(actor, self.settings.owner_id):
+                raise Conflict('Доступ к боту отозван.')
+            payload = data.get('payload')
+            if isinstance(payload, str):
+                payload = json.loads(payload)
+            if not isinstance(payload, dict):
+                raise ValueError
+            await self.button_action(actor, peer, payload)
+        except (Conflict, ProviderError) as error:
+            await self.client.send(peer, str(error), keyboard=keyboard(back()))
+        except (ValueError, TypeError, KeyError):
+            await self.client.send(peer, 'Кнопка некорректна. Откройте /menu заново.', keyboard=keyboard(back()))
+        except Exception:
+            if fresh:
+                self.store.end_event(key, False)
+            raise
+        if fresh:
+            self.store.end_event(key, True)
 
     async def photo(self, message, directory):
         attachments = [a['photo'] for a in message.get('attachments', []) if a.get('type') == 'photo' and 'photo' in a]

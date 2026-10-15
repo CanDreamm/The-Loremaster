@@ -13,7 +13,7 @@ PROJECT_FIELDS = {'concept': 'Концепция', 'tone': 'Тон общени�
 
 
 def button(label, screen, **params):
-    return {'action': {'type': 'text', 'label': label[:40],
+    return {'action': {'type': 'callback', 'label': label[:40],
                        'payload': json.dumps({'action': 'menu', 'screen': screen, **params})},
             'color': 'secondary'}
 

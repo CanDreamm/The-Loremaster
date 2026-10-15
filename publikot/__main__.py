@@ -1,5 +1,6 @@
 import argparse
 import asyncio
+import errno
 import logging
 import sys
 
@@ -36,6 +37,8 @@ async def run(args):
     settings = Settings.load(require_owner=not (args.identify or args.check))
     async with aiohttp.ClientSession(trust_env=False) as session:
         client = VkMessages(settings.bot_token, settings.group_id, session)
+        if not (args.identify or args.check):
+            await client.enable_callback_events()
         server = await client.long_poll_server()
         if args.check:
             print(f'API ВК и сервер Bots Long Poll доступны. Сообщество: {settings.group_id}.')
@@ -64,17 +67,23 @@ async def run(args):
             server['ts'] = saved
         app = VkBot(settings, store, client)
         runner = None
-        print(f'Публикот запущен в сообщениях ВК, сообщество {settings.group_id}. Демо: {settings.demo}', flush=True)
         delay = 2
         try:
             if settings.oauth_enabled:
                 manager = OAuthManager(settings, store, VkOAuthProvider(settings, session))
                 runner = web.AppRunner(create_web_app(manager, notify=client.send), access_log=None)
                 await runner.setup()
-                await web.TCPSite(runner, '127.0.0.1', settings.oauth_port).start()
+                try:
+                    await web.TCPSite(runner, '127.0.0.1', settings.oauth_port).start()
+                except OSError as error:
+                    if error.errno == errno.EADDRINUSE:
+                        raise ConfigError(f'Запуск остановлен: порт 127.0.0.1:{settings.oauth_port} занят. '
+                                          'Проверьте уже работающий экземпляр бота.') from None
+                    raise
                 app.oauth = manager
                 print(f'OAuth: приложение {settings.oauth_client_id}, режим {settings.oauth_provider}, callback {settings.oauth_redirect}', flush=True)
                 print('OAuth-обработчик запущен локально; публичный HTTPS настраивается отдельно.', flush=True)
+            print(f'Публикот запущен в сообщениях ВК, сообщество {settings.group_id}. Демо: {settings.demo}', flush=True)
             while True:
                 try:
                     response = await client.poll(server)

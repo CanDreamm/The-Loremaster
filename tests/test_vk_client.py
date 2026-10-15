@@ -35,6 +35,35 @@ class Session:
 
 
 class VkClientTests(unittest.IsolatedAsyncioTestCase):
+    async def test_callback_events_are_enabled_without_disabling_other_subscriptions(self):
+        client = VkMessages('private-key', 123, None)
+        client.api = AsyncMock(side_effect=[{'enabled': 1, 'api_version': '5.199',
+            'events': {'message_new': 1, 'message_event': 0, 'group_join': 1, 'message_reply': 0}}, 1])
+        await client.enable_callback_events()
+        client.api.assert_awaited_with('groups.setLongPollSettings', group_id=123, enabled=1,
+            api_version='5.199', message_new=1, message_event=1, group_join=1, message_reply=0)
+
+    async def test_enabled_callback_events_do_not_reconfigure_long_poll(self):
+        client = VkMessages('private-key', 123, None)
+        client.api = AsyncMock(return_value={'enabled': 1, 'api_version': '5.199',
+            'events': {'message_new': 1, 'message_event': 1}})
+        await client.enable_callback_events()
+        client.api.assert_awaited_once_with('groups.getLongPollSettings', group_id=123)
+
+    async def test_callback_events_upgrade_old_long_poll_version(self):
+        client = VkMessages('private-key', 123, None)
+        client.api = AsyncMock(side_effect=[{'enabled': 0, 'api_version': '5.103',
+            'events': {'message_new': 0, 'message_event': 0}}, 1])
+        await client.enable_callback_events()
+        client.api.assert_awaited_with('groups.setLongPollSettings', group_id=123, enabled=1,
+            api_version='5.199', message_new=1, message_event=1)
+
+    async def test_callback_answer_uses_event_identity(self):
+        client = VkMessages('private-key', 123, None)
+        client.api = AsyncMock(return_value=1)
+        await client.answer_event(42, 42, 'callback-id')
+        client.api.assert_awaited_once_with('messages.sendMessageEventAnswer', event_id='callback-id', user_id=42, peer_id=42)
+
     async def test_successful_chunks_are_tracked_even_if_later_send_fails(self):
         with tempfile.TemporaryDirectory() as directory:
             store = Store(Path(directory) / 'test.sqlite3')
