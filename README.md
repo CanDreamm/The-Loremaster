@@ -83,6 +83,7 @@ python3 -m venv .venv
 
 - [Настройка ВК](docs/vk-setup.md)
 - [Подключение через OAuth](docs/oauth.md)
+- [Проверка прав и ограничения публикаций API](docs/vk-api-findings.md)
 - [Установка и обновления сервера](docs/python-deploy.md)
 - [Участники и назначения](docs/access.md)
 - [Требования и оставшиеся этапы](docs/requirements.md)
