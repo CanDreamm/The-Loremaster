@@ -6,7 +6,7 @@ import unittest
 from dataclasses import replace
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 from aiohttp.test_utils import TestClient, TestServer
 
@@ -134,6 +134,45 @@ class OAuthTests(unittest.IsolatedAsyncioTestCase):
             await self.complete()
         self.assertFalse(self.manager.has_connection(self.project))
         self.assertEqual(self.store.db.execute('SELECT verifier FROM oauth_states').fetchone()['verifier'], '')
+
+    async def test_vk_api_diagnostic_contains_method_and_code_without_raw_response(self):
+        for code in (5, 7, 15, 27, 1051, 'private-user-test-token'):
+            session = MagicMock()
+            response = session.post.return_value.__aenter__.return_value
+            response.status = 200
+            response.json = AsyncMock(return_value={'error': {
+                'error_code': code, 'error_msg': 'private-user-test-token',
+                'request_params': [{'key': 'access_token', 'value': 'private-user-test-token'}],
+            }})
+            provider = VkOAuthProvider(self.settings, session)
+            with self.assertRaises(ProviderError) as error:
+                await provider.api('private-user-test-token', 'account.getProfileInfo')
+            message = str(error.exception)
+            self.assertIn('account.getProfileInfo', message)
+            self.assertIn(str(code) if isinstance(code, int) else 'неизвестен', message)
+            self.assertNotIn('private-user-test-token', message)
+
+    async def test_api_failure_callback_shows_exact_stage_and_does_not_save_token(self):
+        session = MagicMock()
+        response = session.post.return_value.__aenter__.return_value
+        response.status = 200
+        response.json = AsyncMock(return_value={'error': {'error_code': 15, 'error_msg': 'private-user-test-token'}})
+        provider = VkOAuthProvider(self.settings, session)
+        provider.exchange = self.provider.exchange
+        self.manager.provider = provider
+        client = TestClient(TestServer(create_web_app(self.manager)))
+        await client.start_server()
+        try:
+            response = await client.get('/oauth/vk/callback', params={'state': self.state(), 'code': 'private-code', 'device_id': 'device'})
+            self.assertEqual(response.status, 400)
+            body = await response.text()
+            self.assertIn('account.getProfileInfo', body)
+            self.assertIn('код API 15', body)
+            self.assertNotIn('private-code', body)
+            self.assertNotIn('private-user-test-token', body)
+            self.assertFalse(self.manager.has_connection(self.project))
+        finally:
+            await client.close()
 
     async def test_expired_token_is_not_used(self):
         await self.complete()

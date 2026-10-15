@@ -2,6 +2,7 @@
 import base64
 import hashlib
 import os
+import re
 import secrets
 import time
 from pathlib import Path
@@ -82,16 +83,27 @@ class VkOAuthProvider:
             raise ProviderError('Не удалось завершить авторизацию ВК. Повторите /connect.') from None
 
     async def api(self, token, method, **params):
+        safe_method = method if re.fullmatch(r'[A-Za-z]+\.[A-Za-z]+', method) else 'API'
         try:
             async with self.session.post('https://api.vk.com/method/' + method,
                 data={**params, 'access_token': token, 'v': '5.199'}, allow_redirects=False,
                 timeout=aiohttp.ClientTimeout(total=30)) as response:
+                if response.status != 200:
+                    raise ProviderError(f'Проверка подключения ВК: {safe_method}, HTTP {response.status}.')
                 result = await response.json()
-                if response.status != 200 or result.get('error') or 'response' not in result:
-                    raise ProviderError('Авторизация не дала доступ к нужному API ВК. Проверьте разрешения приложения.')
+                if not isinstance(result, dict):
+                    raise ProviderError(f'Проверка подключения ВК: {safe_method}, некорректный формат ответа.')
+                if result.get('error'):
+                    error = result['error']
+                    code = error.get('error_code') if isinstance(error, dict) else None
+                    code = code if type(code) is int else 'неизвестен'
+                    raise ProviderError(f'Проверка подключения ВК: {safe_method}, код API {code}. '
+                                        'ВК отклонил проверку пользовательского ключа. Подключение не сохранено.')
+                if 'response' not in result:
+                    raise ProviderError(f'Проверка подключения ВК: {safe_method}, ответ API отсутствует.')
                 return result['response']
         except (aiohttp.ClientError, TimeoutError, ValueError):
-            raise ProviderError('Не удалось проверить права пользователя ВК.') from None
+            raise ProviderError(f'Не удалось выполнить проверку ВК: {safe_method}. Сетевая ошибка или некорректный JSON.') from None
 
     async def validate(self, token, actor, group):
         profile = await self.api(token, 'account.getProfileInfo')
