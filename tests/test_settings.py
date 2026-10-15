@@ -30,6 +30,17 @@ class SettingsTests(unittest.TestCase):
     def test_identify_does_not_require_admin_id(self):
         self.assertEqual(self.load({'VK_BOT_TOKEN': 'test-bot'}, require_owner=False).owner_id, 0)
 
+    def test_oauth_configuration_requires_https_and_complete_app(self):
+        base = {'VK_BOT_TOKEN': 'test-bot', 'OWNER_VK_ID': '42', 'VK_OAUTH_CLIENT_ID': '12345'}
+        for public in ('', 'http://bot.example.com', 'https://user:secret@bot.example.com', 'https://bot.example.com/path', 'https://bot.example.com?secret=x'):
+            with self.assertRaises(ConfigError):
+                self.load({**base, 'OAUTH_PUBLIC_URL': public})
+        config = self.load({**base, 'OAUTH_PUBLIC_URL': 'https://bot.example.com'})
+        self.assertTrue(config.oauth_enabled)
+        self.assertEqual(config.oauth_redirect, 'https://bot.example.com/oauth/vk/callback')
+        with self.assertRaises(ConfigError):
+            self.load({**base, 'OAUTH_PUBLIC_URL': 'https://bot.example.com', 'VK_OAUTH_PROVIDER': 'vk_api'})
+
     def test_bot_key_and_admin_key_are_not_shared_with_members(self):
         settings = self.load({'VK_BOT_TOKEN': 'bot-secret', 'OWNER_VK_ID': '42', 'VK_ACCESS_TOKEN': 'admin-secret'})
         with patch.dict(os.environ, {}, clear=True):

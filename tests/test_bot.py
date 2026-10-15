@@ -1,10 +1,12 @@
 import json
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 from publikot.providers import AmbiguousPublish
+from publikot.oauth import OAuthManager
 from publikot.settings import Settings
 from publikot.store import Store
 from publikot.vk_bot import VkBot
@@ -178,3 +180,38 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
         await self.send('/allow 99')
         await self.send(user=99, payload={'action': 'cancel', 'job': job['id'], 'revision': 1})
         self.assertEqual(self.store.job(42, job['id'])['status'], 'review')
+
+    async def test_connect_command_returns_official_link_not_token(self):
+        await self.setup_project()
+        settings = replace(self.settings, oauth_client_id='12345', oauth_public_url='https://bot.example.com')
+        self.app.oauth = OAuthManager(settings, self.store, None)
+        await self.send('/connect')
+        response = self.client.sent[-1]
+        link = response['keyboard']['buttons'][0][0]['action']['link']
+        self.assertTrue(link.startswith('https://id.vk.com/authorize?'))
+        self.assertNotIn('access_token', link)
+        self.assertIn('10 минут', response['text'])
+
+    async def test_publisher_uses_encrypted_connection_without_env_key(self):
+        project = await self.setup_project()
+        settings = replace(self.settings, oauth_client_id='12345', oauth_public_url='https://bot.example.com')
+        provider = type('Provider', (), {})()
+        provider.exchange = AsyncMock(return_value={'access_token': 'oauth-private-test-token'})
+        provider.validate = AsyncMock()
+        manager = OAuthManager(settings, self.store, provider)
+        from urllib.parse import urlsplit, parse_qs
+        state = parse_qs(urlsplit(manager.begin(42, project)).query)['state'][0]
+        await manager.complete(state, 'one-use-code', 'device')
+        self.app.oauth = manager
+        keys = []
+        def publisher(token):
+            keys.append(token)
+            return type('Publisher', (), {'publish': self.publish})()
+        self.app.publisher_factory = publisher
+        ident, _ = self.store.create_job(42, 'Тема')
+        self.store.save_version(42, ident, 1, 'Текст', False)
+        with patch.dict('os.environ', {}, clear=True):
+            await self.send(payload={'action': 'publish', 'job': ident, 'revision': 1})
+        self.assertEqual(keys, ['oauth-private-test-token'])
+        self.assertNotIn('oauth-private-test-token', str(self.client.sent))
+        self.assertEqual(self.store.job(42, ident)['status'], 'published')

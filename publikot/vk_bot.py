@@ -11,6 +11,7 @@ HELP = (
     '/settings — настройки\n/concept Описание\n/tone Тон общения\n'
     '/textprompt Промпт текста\n/imageprompt Промпт картинки\n/style Визуальный стиль\n'
     '/vk НОМЕР — сообщество для публикаций\n'
+    '/connect — подключить публикации через авторизацию ВК\n/connection — статус подключения\n/disconnect — отключить OAuth-ключ проекта\n'
     '/reference Описание — сохранить приложенное фото как референс\n/references — показать референсы\n'
     '/character Имя | Описание — персонаж, можно с фото\n/characters — список\n'
     '/post Тема и тезисы — подготовить пост, можно приложить фото\n'
@@ -31,10 +32,11 @@ def preview_keyboard(job):
 
 
 class VkBot:
-    def __init__(self, settings, store, client, text_ai=None, publisher_factory=VkPublisher):
+    def __init__(self, settings, store, client, text_ai=None, publisher_factory=VkPublisher, oauth=None):
         self.settings, self.store, self.client = settings, store, client
         self.text_ai = text_ai or YandexText(settings.yandex_key, settings.yandex_folder, settings.demo)
         self.publisher_factory = publisher_factory
+        self.oauth = oauth
 
     async def handle(self, event):
         if event.get('type') != 'message_new' or event.get('group_id') != self.settings.group_id:
@@ -140,7 +142,27 @@ class VkBot:
             return await self.client.send(peer, '\n'.join(f"№{p['id']} — {p['name']}" for p in rows) or 'Назначенных проектов нет. Обратитесь к администратору.')
         if command == '/select':
             s.select(actor, int(args))
-            return await self.client.send(peer, 'Проект выбран. /settings — настройки, /post Тема — новый пост.')
+            keyboard = {'inline': True, 'buttons': [[{'action': {'type': 'text', 'label': 'Подключить сообщество', 'payload': json.dumps({'action': 'connect', 'project': int(args)})}, 'color': 'primary'}]]}
+            return await self.client.send(peer, 'Проект выбран. /settings — настройки, /post Тема — новый пост.', keyboard=keyboard)
+        if command == '/connect':
+            return await self.connect(actor, peer, s.project(actor)['id'])
+        if command == '/connection':
+            project = s.project(actor)
+            row = self.oauth.status(actor, project['id']) if self.oauth else None
+            if row:
+                state = row['status']
+                if row['group_id'] != project['vk_group']:
+                    state = 'сообщество изменилось — требуется /connect'
+                elif row['expires_at'] and row['expires_at'] <= self.oauth.now():
+                    state = 'срок ключа истёк — требуется /connect'
+                return await self.client.send(peer, f"OAuth проекта №{project['id']}: {state}. Сообщество: {row['group_id']}. Авторизовал пользователь: {row['actor']}.")
+            return await self.client.send(peer, 'Подключения OAuth нет. Выполните /connect. Ранее заданные вручную ключи проверяются отдельно.')
+        if command == '/disconnect':
+            project = s.project(actor)
+            if not self.oauth:
+                raise Conflict('OAuth не настроен. Ключи из .env.python отключаются на сервере.')
+            self.oauth.disconnect(actor, project['id'])
+            return await self.client.send(peer, 'OAuth-ключ проекта удалён с сервера. При необходимости отзовите доступ приложению также в настройках ВК.')
         fields = {'/concept': 'concept', '/tone': 'tone', '/textprompt': 'text_prompt', '/imageprompt': 'image_prompt', '/style': 'visual_style'}
         if command in fields:
             if not args or len(args) > 12000:
@@ -152,7 +174,7 @@ class VkBot:
             if group <= 0:
                 raise ValueError
             s.configure(actor, 'vk_group', group)
-            return await self.client.send(peer, 'Сообщество публикаций сохранено для новых заданий. Оно не связано автоматически с сообществом бота.')
+            return await self.client.send(peer, 'Сообщество публикаций сохранено. Для авторизации отправьте /connect. Старое OAuth-подключение к другому сообществу не используется.')
         if command == '/settings':
             project = s.project(actor)
             labels = {'concept': 'Концепция', 'tone': 'Тон', 'text_prompt': 'Промпт текста', 'image_prompt': 'Промпт картинки', 'visual_style': 'Визуальный стиль', 'vk_group': 'Сообщество публикаций'}
@@ -228,7 +250,17 @@ class VkBot:
             raise
         await self.preview(actor, peer, ident)
 
+    async def connect(self, actor, peer, project_id):
+        project = self.store.require(actor, project_id)
+        if not self.oauth:
+            raise Conflict('Авторизация пока не настроена администратором. Нужны приложение ВК и публичный HTTPS-адрес возврата.')
+        url = self.oauth.begin(actor, project_id)
+        keyboard = {'inline': True, 'buttons': [[{'action': {'type': 'open_link', 'label': 'Авторизоваться в ВК', 'link': url}}]]}
+        await self.client.send(peer, f"Подключение проекта №{project_id} — {project['name']}, сообщество {project['vk_group']}.\nВойдите тем аккаунтом ВК, из которого пишете боту. Ключ останется на сервере и разрешит публикации всем назначенным участникам этого проекта. Ссылка действует 10 минут.", keyboard=keyboard)
+
     async def action(self, actor, peer, payload):
+        if payload.get('action') == 'connect':
+            return await self.connect(actor, peer, int(payload['project']))
         action, ident, revision = payload['action'], int(payload['job']), int(payload['revision'])
         s = self.store
         job = s.expect_review(actor, ident, revision)
@@ -242,9 +274,15 @@ class VkBot:
             return await self.client.send(peer, text)
         if action != 'publish':
             raise Conflict('Неизвестная кнопка.')
-        token = self.settings.vk_token_for(actor, job['project_id'])
+        project = s.require(actor, job['project_id'])
+        if project['vk_group'] != job['target_group']:
+            raise Conflict('Сообщество проекта изменилось. Создайте новое задание для текущего сообщества.')
+        if self.oauth and self.oauth.has_connection(job['project_id']):
+            token = self.oauth.token_for(actor, job['project_id'], job['target_group'])
+        else:
+            token = self.settings.vk_token_for(actor, job['project_id'])
         if not token:
-            raise Conflict('Ключ публикации проекта не задан. Ключ сообщества бота для публикаций не используется.')
+            raise Conflict('Нет действующего ключа публикации. Выполните /connect для выбранного проекта. Ключ сообщества бота не используется.')
         job, version = s.claim(actor, ident, revision)
         try:
             url = await self.publisher_factory(token).publish(job['target_group'], version['body'], version['image_path'], ident)

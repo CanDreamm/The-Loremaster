@@ -4,7 +4,9 @@ import logging
 import sys
 
 import aiohttp
+from aiohttp import web
 
+from .oauth import OAuthManager, VkOAuthProvider, create_web_app
 from .providers import ProviderError
 from .settings import ConfigError, Settings
 from .store import Store
@@ -55,9 +57,17 @@ async def run(args):
         if saved:
             server['ts'] = saved
         app = VkBot(settings, store, client)
+        runner = None
         print(f'Публикот запущен в сообщениях ВК, сообщество {settings.group_id}. Демо: {settings.demo}', flush=True)
         delay = 2
         try:
+            if settings.oauth_enabled:
+                manager = OAuthManager(settings, store, VkOAuthProvider(settings, session))
+                runner = web.AppRunner(create_web_app(manager, notify=client.send), access_log=None)
+                await runner.setup()
+                await web.TCPSite(runner, '127.0.0.1', settings.oauth_port).start()
+                app.oauth = manager
+                print('OAuth-обработчик запущен локально; публичный HTTPS настраивается отдельно.', flush=True)
             while True:
                 try:
                     response = await client.poll(server)
@@ -82,6 +92,8 @@ async def run(args):
                     await asyncio.sleep(delay)
                     delay = min(delay * 2, 30)
         finally:
+            if runner:
+                await runner.cleanup()
             store.db.close()
 
 
