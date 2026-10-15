@@ -99,6 +99,7 @@ python3 -m venv .venv
 - [Настройка ВК](docs/vk-setup.md)
 - [Минимальный запуск и меню](docs/minimal-start.md)
 - [Подключение через OAuth](docs/oauth.md)
+- [Пользовательский ключ через Implicit Flow](docs/implicit-oauth.md)
 - [Проверка callback и сверка с официальными SDK ВК](docs/oauth-integration-audit.md)
 - [Проверка прав и ограничения публикаций API](docs/vk-api-findings.md)
 - [Установка и обновления сервера](docs/python-deploy.md)

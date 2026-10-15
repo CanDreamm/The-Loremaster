@@ -32,3 +32,13 @@ class OAuthSetupTests(unittest.TestCase):
             with self.assertRaises(SystemExit):
                 self.configure(target)
             self.assertFalse(target.exists())
+
+    def test_explicit_implicit_selection_preserves_secrets(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / '.env.python'
+            target.write_text('VK_BOT_TOKEN=test-bot\nVK_OAUTH_CLIENT_SECRET=test-secret\nVK_OAUTH_PROVIDER=vkid\n')
+            self.configure(target, 'vk_implicit')
+            values = dotenv_values(target)
+            self.assertEqual(values['VK_OAUTH_PROVIDER'], 'vk_implicit')
+            self.assertEqual(values['VK_BOT_TOKEN'], 'test-bot')
+            self.assertEqual(values['VK_OAUTH_CLIENT_SECRET'], 'test-secret')

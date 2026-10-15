@@ -52,6 +52,13 @@ class SettingsTests(unittest.TestCase):
         self.assertNotIn('bot-secret', repr(settings))
         self.assertNotIn('admin-secret', repr(settings))
 
+    def test_implicit_provider_needs_no_client_secret(self):
+        settings = self.load({'VK_BOT_TOKEN': 'bot-test-key', 'OWNER_VK_ID': '42',
+                              'VK_OAUTH_CLIENT_ID': '54825414', 'OAUTH_PUBLIC_URL': 'https://bot.itiscat.ru',
+                              'VK_OAUTH_PROVIDER': 'vk_implicit'})
+        self.assertEqual(settings.oauth_provider, 'vk_implicit')
+        self.assertTrue(settings.oauth_enabled)
+
     def test_setup_preserves_existing_values_and_unrelated_settings(self):
         source = Path(__file__).resolve().parent.parent / 'scripts' / 'setup-python.py'
         with tempfile.TemporaryDirectory() as directory:

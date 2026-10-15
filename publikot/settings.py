@@ -66,8 +66,8 @@ class Settings:
         provider = os.getenv('VK_OAUTH_PROVIDER', 'vkid')
         secret = os.getenv('VK_OAUTH_CLIENT_SECRET', '')
         port = os.getenv('OAUTH_PORT', '8081')
-        if provider not in ('vkid', 'vk_api') or not port.isdecimal() or not 1024 <= int(port) <= 65535:
-            raise ConfigError('Проверьте VK_OAUTH_PROVIDER (vkid или vk_api) и OAUTH_PORT (1024–65535).')
+        if provider not in ('vkid', 'vk_api', 'vk_implicit') or not port.isdecimal() or not 1024 <= int(port) <= 65535:
+            raise ConfigError('Проверьте VK_OAUTH_PROVIDER (vkid, vk_api или vk_implicit) и OAUTH_PORT (1024–65535).')
         if client or public or secret:
             url = urlsplit(public)
             if not client.isdecimal() or int(client) <= 0 or url.scheme != 'https' or not url.hostname or url.username or url.password or url.path or url.query or url.fragment:

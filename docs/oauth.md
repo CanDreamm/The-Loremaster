@@ -51,6 +51,10 @@ wall/photos в SDK не гарантирует write-доступ нового V
 
 Адаптеры:
 
+- `vk_implicit`: пользовательский ключ через `oauth.vk.com`,
+  `response_type=token`, приём fragment в браузере и передача через POST.
+  [Включение и проверки](implicit-oauth.md). Требуется приложение с доступом
+  к этому flow и publishing scopes.
 - `vkid`: Authorization Code + PKCE S256, callback с code и device_id. Официальный
   SDK: https://github.com/VKCOM/vkid-web-sdk. Только с доступными приложению scopes.
 - `vk_api`: authorization code через oauth.vk.com с секретом собственного приложения.
@@ -100,6 +104,10 @@ OAUTH_PORT=8081
 не доказывает доступность HTTPS извне.
 
 ## Проверка реального подключения
+
+Пользовательский Implicit Flow включается командой
+`.venv/bin/python scripts/configure-oauth.py --provider vk_implicit` и перезапуском
+бота. Скрипт без `--provider` сохраняет выбранный режим.
 
 /select НОМЕР → /vk ID → /connect → официальная авторизация → /connection.
 В браузере появится результат, в боте — уведомление без ключа. После этого

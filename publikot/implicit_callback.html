@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Подключение ВК — Публикот</title>
+</head>
+<body>
+  <h1>Подключение сообщества ВК</h1>
+  <p id="status">Проверяю ответ ВК…</p>
+  <noscript>Для завершения подключения включите JavaScript и запросите новую ссылку в боте.</noscript>
+  <script nonce="__NONCE__">
+  (async () => {
+    const fragment = new URLSearchParams(location.hash.slice(1));
+    const query = new URLSearchParams(location.search);
+    // Remove credentials from browser history before any request or rendering.
+    history.replaceState(null, '', location.pathname);
+    const status = document.getElementById('status');
+    const answer = fragment.size ? fragment : query;
+    for (const name of ['state', 'access_token', 'expires_in', 'error']) {
+      if (answer.getAll(name).length > 1) {
+        status.textContent = 'Некорректный ответ ВК. Запросите новую ссылку в боте.';
+        return;
+      }
+    }
+    const state = answer.get('state');
+    const denied = answer.has('error');
+    const token = fragment.get('access_token');
+    const lifetime = fragment.get('expires_in');
+    if (!state || (!denied && (!token || lifetime === null))) {
+      status.textContent = 'ВК не вернул ключ Implicit Flow. Запросите новую ссылку подключения в боте.';
+      return;
+    }
+    try {
+      const response = await fetch(location.pathname, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        credentials: 'omit',
+        cache: 'no-store',
+        redirect: 'error',
+        body: JSON.stringify({state, access_token: denied ? '' : token,
+                              expires_in: lifetime, denied})
+      });
+      // Render only the server's safe text, never the VK fragment or token.
+      const text = await response.text();
+      status.textContent = response.status === 200 || response.status === 400
+        ? text : 'Сервер не завершил подключение. Запросите новую ссылку в боте.';
+    } catch (_) {
+      status.textContent = 'Не удалось связаться с сервером. Запросите новую ссылку в боте.';
+    }
+  })();
+  </script>
+</body>
+</html>

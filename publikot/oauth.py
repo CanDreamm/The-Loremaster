@@ -19,6 +19,7 @@ from .menus import button, keyboard
 
 SECURE_HEADERS = {
     'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer',
+    'X-Publikot-OAuth': '1',
     'Content-Security-Policy': "default-src 'none'; frame-ancestors 'none'; base-uri 'none'",
     'X-Content-Type-Options': 'nosniff', 'X-Frame-Options': 'DENY',
 }
@@ -62,6 +63,8 @@ class VkOAuthProvider:
 
     async def exchange(self, code, verifier, device_id, state):
         config = self.settings
+        if config.oauth_provider == 'vk_implicit':
+            raise ProviderError('Implicit Flow возвращает ключ в браузер, а не код для обмена.')
         data = {'client_id': config.oauth_client_id, 'redirect_uri': config.oauth_redirect,
                 'code': code, 'grant_type': 'authorization_code'}
         if config.oauth_provider == 'vkid':
@@ -162,6 +165,9 @@ class OAuthManager:
           status TEXT NOT NULL DEFAULT 'active'
         );
         ''')
+        state_columns = {row['name'] for row in self.db.execute('PRAGMA table_info(oauth_states)')}
+        if 'flow' not in state_columns:
+            self.db.execute("ALTER TABLE oauth_states ADD COLUMN flow TEXT NOT NULL DEFAULT 'code'")
         existing = self.db.execute("SELECT 1 FROM vk_connections WHERE token<>'' LIMIT 1").fetchone()
         self.vault = Vault(settings.data_dir / 'oauth.key', may_create=not existing)
 
@@ -180,7 +186,10 @@ class OAuthManager:
         expiry = int(self.now()) + 600
         with self.store.transaction():
             self.db.execute("UPDATE oauth_states SET status='failed',verifier='' WHERE actor=? AND project_id=? AND status IN ('pending','processing')", (actor, project_id))
-            self.db.execute('INSERT INTO oauth_states(state_hash,actor,project_id,group_id,expires_at,verifier) VALUES (?,?,?,?,?,?)', (digest, actor, project_id, project['vk_group'], expiry, self.vault.encrypt(verifier)))
+            implicit = self.settings.oauth_provider == 'vk_implicit'
+            self.db.execute('INSERT INTO oauth_states(state_hash,actor,project_id,group_id,expires_at,verifier,flow) VALUES (?,?,?,?,?,?,?)',
+                (digest, actor, project_id, project['vk_group'], expiry,
+                 '' if implicit else self.vault.encrypt(verifier), 'implicit' if implicit else 'code'))
         params = {'client_id': self.settings.oauth_client_id, 'redirect_uri': self.settings.oauth_redirect,
                   'response_type': 'code', 'state': state}
         if self.settings.oauth_provider == 'vkid':
@@ -189,6 +198,8 @@ class OAuthManager:
             endpoint = 'https://id.vk.com/authorize'
         else:
             params.update(scope='wall,photos', v='5.199', display='page')
+            if self.settings.oauth_provider == 'vk_implicit':
+                params.update(response_type='token', scope='wall,photos,groups,offline', revoke='1')
             endpoint = 'https://oauth.vk.com/authorize'
         return endpoint + '?' + urlencode(params)
 
@@ -200,11 +211,16 @@ class OAuthManager:
             row = self.db.execute('SELECT * FROM oauth_states WHERE state_hash=?', (digest,)).fetchone()
             if not row or row['status'] != 'pending' or row['expires_at'] <= self.now():
                 raise Conflict('Ссылка истекла или уже использована. Повторите /connect в боте.')
+            expected_flow = 'implicit' if self.settings.oauth_provider == 'vk_implicit' else 'code'
+            if row['flow'] != expected_flow:
+                raise Conflict('Способ авторизации изменился. Запросите новую ссылку в боте.')
             self.guard(row['actor'], row['project_id'], row['group_id'])
             self.db.execute("UPDATE oauth_states SET status='processing' WHERE state_hash=?", (digest,))
         return dict(row)
 
     async def complete(self, state, code, device_id='', denied=False):
+        if self.settings.oauth_provider == 'vk_implicit':
+            raise Conflict('Ожидался ключ Implicit Flow, но ВК вернул код. Запросите новую ссылку подключения.')
         row = self.claim_state(state)
         try:
             if denied:
@@ -212,23 +228,42 @@ class OAuthManager:
             if not isinstance(code, str) or not code or len(code) > 4096:
                 raise Conflict('ВК не передал код авторизации. Повторите /connect.')
             result = await self.provider.exchange(code, self.vault.decrypt(row['verifier']), device_id, state)
-            token = result['access_token']
-            await self.provider.validate(token, row['actor'], row['group_id'], result)
-            lifetime = int(result.get('expires_in', 0))
-            if lifetime < 0:
-                raise ProviderError('ВК выдал недействительный срок ключа.')
-            expiry = int(self.now()) + lifetime if lifetime else 0
-            with self.store.transaction():
-                self.guard(row['actor'], row['project_id'], row['group_id'])
-                current = self.db.execute('SELECT status FROM oauth_states WHERE state_hash=?', (row['state_hash'],)).fetchone()
-                if not current or current['status'] != 'processing':
-                    raise Conflict('Подключение отменено. Повторите /connect.')
-                self.db.execute("INSERT INTO vk_connections(project_id,group_id,actor,token,expires_at,status) VALUES (?,?,?,?,?,'active') ON CONFLICT(project_id) DO UPDATE SET group_id=excluded.group_id,actor=excluded.actor,token=excluded.token,expires_at=excluded.expires_at,status='active'", (row['project_id'], row['group_id'], row['actor'], self.vault.encrypt(token), expiry))
-                self.db.execute("UPDATE oauth_states SET status='done',verifier='' WHERE state_hash=?", (row['state_hash'],))
-            return row
+            return await self.save_connection(row, result)
         except Exception:
             self.db.execute("UPDATE oauth_states SET status='failed',verifier='' WHERE state_hash=?", (row['state_hash'],))
             raise
+
+    async def complete_implicit(self, state, token, lifetime, denied=False):
+        if self.settings.oauth_provider != 'vk_implicit':
+            raise Conflict('Приём ключа Implicit Flow не включён.')
+        row = self.claim_state(state)
+        try:
+            if denied:
+                raise Conflict('Вы отменили авторизацию. Сообщество не подключено.')
+            if not isinstance(token, str) or not 1 <= len(token) <= 4096 or any(c.isspace() for c in token):
+                raise Conflict('ВК не передал корректный пользовательский ключ. Повторите подключение.')
+            if type(lifetime) not in (str, int) or not re.fullmatch(r'[0-9]{1,10}', str(lifetime)):
+                raise Conflict('ВК не передал корректный срок действия ключа.')
+            return await self.save_connection(row, {'access_token': token, 'expires_in': int(lifetime)})
+        except Exception:
+            self.db.execute("UPDATE oauth_states SET status='failed',verifier='' WHERE state_hash=?", (row['state_hash'],))
+            raise
+
+    async def save_connection(self, row, result):
+        token = result['access_token']
+        await self.provider.validate(token, row['actor'], row['group_id'], result)
+        lifetime = int(result.get('expires_in', 0))
+        if lifetime < 0:
+            raise ProviderError('ВК выдал недействительный срок ключа.')
+        expiry = int(self.now()) + lifetime if lifetime else 0
+        with self.store.transaction():
+            self.guard(row['actor'], row['project_id'], row['group_id'])
+            current = self.db.execute('SELECT status FROM oauth_states WHERE state_hash=?', (row['state_hash'],)).fetchone()
+            if not current or current['status'] != 'processing':
+                raise Conflict('Подключение отменено. Повторите /connect.')
+            self.db.execute("INSERT INTO vk_connections(project_id,group_id,actor,token,expires_at,status) VALUES (?,?,?,?,?,'active') ON CONFLICT(project_id) DO UPDATE SET group_id=excluded.group_id,actor=excluded.actor,token=excluded.token,expires_at=excluded.expires_at,status='active'", (row['project_id'], row['group_id'], row['actor'], self.vault.encrypt(token), expiry))
+            self.db.execute("UPDATE oauth_states SET status='done',verifier='' WHERE state_hash=?", (row['state_hash'],))
+        return row
 
     def has_connection(self, project_id):
         return self.db.execute('SELECT 1 FROM vk_connections WHERE project_id=?', (project_id,)).fetchone() is not None
@@ -259,8 +294,31 @@ def create_web_app(manager, notify=None):
         if any(len(request.query.getall(key, [])) > 1 for key in ('state', 'code', 'device_id', 'error')):
             return web.Response(status=400, text='Некорректный ответ авторизации.', headers=SECURE_HEADERS)
         try:
-            row = await manager.complete(request.query.get('state', ''), request.query.get('code', ''),
-                                         request.query.get('device_id', ''), denied='error' in request.query)
+            implicit = manager.settings.oauth_provider == 'vk_implicit'
+            if request.method == 'POST':
+                if not implicit or request.query or request.headers.get('Origin') != manager.settings.oauth_public_url.rstrip('/'):
+                    raise Conflict('Недопустимый источник запроса подключения.')
+                if request.content_type != 'application/json':
+                    raise Conflict('Недопустимый формат запроса подключения.')
+                try:
+                    payload = await request.json()
+                except (ValueError, web.HTTPRequestEntityTooLarge):
+                    raise Conflict('Некорректный запрос подключения.') from None
+                if not isinstance(payload, dict) or set(payload) - {'state', 'access_token', 'expires_in', 'denied'}:
+                    raise Conflict('Некорректный запрос подключения.')
+                row = await manager.complete_implicit(payload.get('state'), payload.get('access_token'),
+                    payload.get('expires_in'), denied=payload.get('denied') is True)
+            elif implicit and 'code' not in request.query:
+                if set(request.query) - {'state', 'error', 'error_description'}:
+                    raise Conflict('Ключи авторизации не принимаются в URL запроса.')
+                nonce = secrets.token_urlsafe(24)
+                html = Path(__file__).with_name('implicit_callback.html').read_text().replace('__NONCE__', nonce)
+                headers = {**SECURE_HEADERS, 'Content-Security-Policy':
+                    SECURE_HEADERS['Content-Security-Policy'] + f"; script-src 'nonce-{nonce}'; connect-src 'self'; form-action 'none'"}
+                return web.Response(text=html, content_type='text/html', headers=headers)
+            else:
+                row = await manager.complete(request.query.get('state', ''), request.query.get('code', ''),
+                                             request.query.get('device_id', ''), denied='error' in request.query)
         except (Conflict, ProviderError) as error:
             return web.Response(status=400, text=str(error), headers=SECURE_HEADERS)
         except Exception:
@@ -276,4 +334,5 @@ def create_web_app(manager, notify=None):
 
     app = web.Application(client_max_size=8192)
     app.router.add_get('/oauth/vk/callback', callback)
+    app.router.add_post('/oauth/vk/callback', callback)
     return app

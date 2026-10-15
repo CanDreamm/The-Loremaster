@@ -72,7 +72,10 @@ curl -sS -i --max-time 15 https://bot.itiscat.ru/oauth/vk/callback
 ```
 
 Это запросы без `state` и `code`: они не расходуют ссылки и не публикуют посты.
-От настоящего обработчика ожидаются HTTP **400**, `Cache-Control: no-store`,
+Для режима `vk_implicit` ожидаются HTTP **200**, HTML и `X-Publikot-OAuth: 1`;
+проверка ключа выполняется последующим POST из браузера. Подробнее —
+[Implicit Flow](implicit-oauth.md).
+Для code flow от обработчика ожидаются HTTP **400**, `Cache-Control: no-store`,
 `Referrer-Policy: no-referrer` и текст «Ссылка подключения недействительна.».
 400 здесь означает, что обработчик доступен и правильно отверг пустой запрос.
 

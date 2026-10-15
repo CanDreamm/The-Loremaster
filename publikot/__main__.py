@@ -73,6 +73,7 @@ async def run(args):
                 await runner.setup()
                 await web.TCPSite(runner, '127.0.0.1', settings.oauth_port).start()
                 app.oauth = manager
+                print(f'OAuth: приложение {settings.oauth_client_id}, режим {settings.oauth_provider}, callback {settings.oauth_redirect}', flush=True)
                 print('OAuth-обработчик запущен локально; публичный HTTPS настраивается отдельно.', flush=True)
             while True:
                 try:
