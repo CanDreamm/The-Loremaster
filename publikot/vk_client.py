@@ -1,5 +1,6 @@
 """VK messages transport. The bot-community key is never used for wall.post."""
 import json
+import re
 import secrets
 from pathlib import Path
 from urllib.parse import urlparse
@@ -7,6 +8,23 @@ from urllib.parse import urlparse
 import aiohttp
 
 from .providers import ProviderError
+
+
+class VkApiError(ProviderError):
+    def __init__(self, method, code):
+        self.code = code if type(code) is int else None
+        self.method = method if re.fullmatch(r'[A-Za-z]+\.[A-Za-z]+', method) else 'API'
+        hints = {
+            5: 'Проверьте ключ сообщества бота.',
+            7: 'Проверьте права ключа сообщества бота.',
+            15: 'Проверьте права ключа и доступ к сообществу.',
+            100: 'ВК отклонил параметры запроса.',
+            901: 'Пользователь должен разрешить сообщения от сообщества.',
+            902: 'Пользователь запретил сообщения от сообщества.',
+            912: 'Включите «Возможности ботов» в настройках сообщений сообщества.',
+        }
+        super().__init__(f'ВК: {self.method}, ошибка API {self.code if self.code is not None else "неизвестна"}. '
+                         + hints.get(self.code, 'Проверьте права ключа и настройки сообщества.'))
 
 
 def trusted_vk_url(value):
@@ -31,7 +49,7 @@ class VkMessages:
                 result = await response.json()
                 if 'error' in result:
                     code = result['error'].get('error_code', '?')
-                    raise ProviderError(f'ВК: ошибка API {code}. Проверьте права ключа и настройки сообщества.')
+                    raise VkApiError(method, code)
                 return result['response']
         except (aiohttp.ClientError, TimeoutError, KeyError, ValueError):
             raise ProviderError('Ошибка связи с API ВК. Секреты не выводятся.') from None
@@ -64,7 +82,18 @@ class VkMessages:
                     params['keyboard'] = json.dumps(keyboard, ensure_ascii=False)
                 if attachment:
                     params['attachment'] = attachment
-            await self.api('messages.send', **params)
+            try:
+                await self.api('messages.send', **params)
+            except VkApiError as error:
+                if error.code != 912 or 'keyboard' not in params:
+                    raise
+                # VK explicitly rejected the keyboard; send a plain explanation.
+                # Other errors and network failures must not cause a resend.
+                params.pop('keyboard')
+                params['message'] = (chunk + '\n\nВК отклонил кнопки (API 912). В управлении '
+                    'сообществом откройте «Сообщения» → «Настройки для бота» и включите '
+                    '«Возможности ботов». Затем отправьте /start заново. Команды: /help.')
+                await self.api('messages.send', **params)
 
     async def download(self, url, target):
         if not trusted_vk_url(url):

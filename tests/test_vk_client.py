@@ -1,8 +1,8 @@
 import unittest
 
-from publikot.__main__ import advance_server
+from publikot.__main__ import advance_server, event_failure
 from publikot.providers import ProviderError
-from publikot.vk_client import VkMessages, trusted_vk_url
+from publikot.vk_client import VkApiError, VkMessages, trusted_vk_url
 
 
 class Response:
@@ -47,6 +47,37 @@ class VkClientTests(unittest.IsolatedAsyncioTestCase):
             await VkMessages('private-key', 242305804, session).api('messages.send')
         self.assertIn('5', str(error.exception))
         self.assertNotIn('private-key', str(error.exception))
+        self.assertIn('messages.send', event_failure(error.exception))
+
+    async def test_disabled_bot_keyboard_gets_plain_explanation(self):
+        class Responses(Session):
+            def post(self, url, **kwargs):
+                self.calls.append((url, kwargs))
+                return Response({'error': {'error_code': 912, 'error_msg': 'private-key'}}
+                                if len(self.calls) == 1 else {'response': 123})
+        session = Responses(None)
+        keys = {'inline': True, 'buttons': []}
+        await VkMessages('private-key', 242305804, session).send(42, 'Меню', keyboard=keys)
+        self.assertEqual(len(session.calls), 2)
+        first, second = [options['data'] for _, options in session.calls]
+        self.assertIn('keyboard', first)
+        self.assertNotIn('keyboard', second)
+        self.assertIn('Возможности ботов', second['message'])
+        self.assertNotIn('private-key', second['message'])
+        self.assertEqual(first['random_id'], second['random_id'])
+
+    async def test_other_vk_errors_do_not_retry_message(self):
+        for code in (5, 100, 901, 902):
+            session = Session({'error': {'error_code': code}})
+            with self.assertRaises(VkApiError):
+                await VkMessages('private-key', 242305804, session).send(42, 'Меню', keyboard={'inline': True})
+            self.assertEqual(len(session.calls), 1)
+
+    async def test_non_numeric_error_code_is_not_printed(self):
+        session = Session({'error': {'error_code': 'private-key', 'error_msg': 'private-key'}})
+        with self.assertRaises(VkApiError) as error:
+            await VkMessages('private-key', 242305804, session).api('messages.send')
+        self.assertNotIn('private-key', event_failure(error.exception))
 
     async def test_long_poll_url_must_belong_to_vk(self):
         session = Session({'response': {'server': 'https://attacker.invalid/poll', 'key': 'secret', 'ts': '1'}})
@@ -55,6 +86,13 @@ class VkClientTests(unittest.IsolatedAsyncioTestCase):
 
 
 class LongPollTests(unittest.TestCase):
+    def test_unexpected_errors_do_not_expose_details_in_log(self):
+        self.assertNotIn('private-key', event_failure(RuntimeError('private-key')))
+        diagnostic = event_failure(VkApiError('messages.send', 912))
+        self.assertIn('messages.send', diagnostic)
+        self.assertIn('912', diagnostic)
+        self.assertIn('Возможности ботов', diagnostic)
+
     def test_cursor_advance_and_expiry(self):
         server = {'server': 'https://lp.vk.com', 'key': 'secret', 'ts': '1'}
         self.assertEqual(advance_server(server, {'ts': '2', 'updates': []})['ts'], '2')

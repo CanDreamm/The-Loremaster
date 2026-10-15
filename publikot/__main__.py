@@ -26,6 +26,12 @@ def advance_server(server, response):
     return {**server, 'ts': str(response['ts'])}
 
 
+def event_failure(error):
+    # ProviderError contains only our safe messages, never raw VK responses.
+    detail = str(error) if isinstance(error, ProviderError) else type(error).__name__
+    return f'Событие не завершено: {detail} Повтора не будет; отправьте команду заново после исправления причины.'
+
+
 async def run(args):
     settings = Settings.load(require_owner=not (args.identify or args.check))
     async with aiohttp.ClientSession(trust_env=False) as session:
@@ -83,7 +89,7 @@ async def run(args):
                             await app.handle(event)
                         except Exception as error:
                             # Не выводим исключения с URL, ключами и пользовательскими материалами.
-                            print(f'Событие не завершено ({type(error).__name__}). Повтора не будет; проверьте /status.', flush=True)
+                            print(event_failure(error), flush=True)
                     server = next_server
                     store.cursor(settings.group_id, server['ts'])
                     delay = 2
