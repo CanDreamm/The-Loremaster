@@ -364,7 +364,7 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
         await self.send('/connect')
         response = self.client.sent[-1]
         link = response['keyboard']['buttons'][0][0]['action']['link']
-        self.assertTrue(link.startswith('https://bot.example.com/oauth/vk/callback?start=1&state='))
+        self.assertTrue(link.startswith('https://id.vk.com/authorize?'))
         self.assertNotIn('access_token', link)
         self.assertIn('10 минут', response['text'])
 

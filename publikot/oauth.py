@@ -1,7 +1,6 @@
 """Project-scoped VK authorization. No tokens are accepted via bot messages."""
 import base64
 import hashlib
-from html import escape
 import os
 import secrets
 import time
@@ -147,27 +146,9 @@ class OAuthManager:
         with self.store.transaction():
             self.db.execute("UPDATE oauth_states SET status='failed',verifier='' WHERE actor=? AND project_id=? AND status IN ('pending','processing')", (actor, project_id))
             self.db.execute('INSERT INTO oauth_states(state_hash,actor,project_id,group_id,expires_at,verifier) VALUES (?,?,?,?,?,?)', (digest, actor, project_id, project['vk_group'], expiry, self.vault.encrypt(verifier)))
-        if self.settings.oauth_provider == 'vkid':
-            # Start on the registered website, not in the messenger's origin.
-            return self.settings.oauth_redirect + '?' + urlencode({'start': '1', 'state': state})
-        return self.authorization_url(state)
-
-    def pending_state(self, state):
-        if not isinstance(state, str) or not 32 <= len(state) <= 128:
-            raise Conflict('Ссылка подключения недействительна.')
-        digest = hashlib.sha256(state.encode()).hexdigest()
-        row = self.db.execute('SELECT * FROM oauth_states WHERE state_hash=?', (digest,)).fetchone()
-        if not row or row['status'] != 'pending' or row['expires_at'] <= self.now():
-            raise Conflict('Ссылка истекла или уже использована. Повторите /connect в боте.')
-        self.guard(row['actor'], row['project_id'], row['group_id'])
-        return dict(row)
-
-    def authorization_url(self, state):
-        row = self.pending_state(state)
         params = {'client_id': self.settings.oauth_client_id, 'redirect_uri': self.settings.oauth_redirect,
                   'response_type': 'code', 'state': state}
         if self.settings.oauth_provider == 'vkid':
-            verifier = self.vault.decrypt(row['verifier'])
             params.update(scope='wall photos', code_challenge_method='S256',
                           code_challenge=base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b'=').decode())
             endpoint = 'https://id.vk.com/authorize'
@@ -177,10 +158,16 @@ class OAuthManager:
         return endpoint + '?' + urlencode(params)
 
     def claim_state(self, state):
+        if not isinstance(state, str) or not 32 <= len(state) <= 128:
+            raise Conflict('Ссылка подключения недействительна.')
+        digest = hashlib.sha256(state.encode()).hexdigest()
         with self.store.transaction():
-            row = self.pending_state(state)
-            self.db.execute("UPDATE oauth_states SET status='processing' WHERE state_hash=?", (row['state_hash'],))
-        return row
+            row = self.db.execute('SELECT * FROM oauth_states WHERE state_hash=?', (digest,)).fetchone()
+            if not row or row['status'] != 'pending' or row['expires_at'] <= self.now():
+                raise Conflict('Ссылка истекла или уже использована. Повторите /connect в боте.')
+            self.guard(row['actor'], row['project_id'], row['group_id'])
+            self.db.execute("UPDATE oauth_states SET status='processing' WHERE state_hash=?", (digest,))
+        return dict(row)
 
     async def complete(self, state, code, device_id='', denied=False):
         row = self.claim_state(state)
@@ -234,26 +221,9 @@ class OAuthManager:
 
 def create_web_app(manager, notify=None):
     async def callback(request):
-        if any(len(request.query.getall(key, [])) > 1 for key in ('state', 'code', 'device_id', 'error', 'start')):
+        if any(len(request.query.getall(key, [])) > 1 for key in ('state', 'code', 'device_id', 'error')):
             return web.Response(status=400, text='Некорректный ответ авторизации.', headers=SECURE_HEADERS)
         try:
-            if 'start' in request.query:
-                if request.query['start'] != '1' or any(key in request.query for key in ('code', 'device_id', 'error')):
-                    raise Conflict('Некорректный запрос начала авторизации.')
-                url = manager.authorization_url(request.query.get('state', ''))
-                # The explicit link policy sends only our registered origin to VK,
-                # even if the reverse proxy sets no-referrer for callback pages.
-                html = ('<!doctype html><html lang="ru"><meta charset="utf-8">'
-                        '<meta name="viewport" content="width=device-width, initial-scale=1">'
-                        '<title>Подключение ВК — Публикот</title><body>'
-                        '<h1>Подключение сообщества ВК</h1>'
-                        '<p>Продолжите на официальном сайте ВК. Войдите тем же аккаунтом, '
-                        'из которого пишете боту. Пароль на этом сайте не запрашивается.</p>'
-                        f'<p>Приложение: {escape(manager.settings.oauth_client_id)}.</p>'
-                        f'<p><a href="{escape(url, quote=True)}" referrerpolicy="origin">Продолжить в ВК</a></p>'
-                        '<p>Ссылка действует 10 минут. Если она истекла, запросите новую в боте.</p>'
-                        '</body></html>')
-                return web.Response(text=html, content_type='text/html', headers=SECURE_HEADERS)
             row = await manager.complete(request.query.get('state', ''), request.query.get('code', ''),
                                          request.query.get('device_id', ''), denied='error' in request.query)
         except (Conflict, ProviderError) as error:
