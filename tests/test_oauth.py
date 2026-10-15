@@ -1,6 +1,8 @@
 import asyncio
 import base64
 import hashlib
+from html import unescape
+import re
 import tempfile
 import unittest
 from dataclasses import replace
@@ -50,6 +52,9 @@ class OAuthTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_pkce_verifier_is_not_in_authorization_link_or_plain_db(self):
         url = self.manager.begin(42, self.project)
+        self.assertEqual(urlsplit(url).hostname, 'bot.example.com')
+        state = parse_qs(urlsplit(url).query)['state'][0]
+        url = self.manager.authorization_url(state)
         params = parse_qs(urlsplit(url).query)
         self.assertEqual(urlsplit(url).hostname, 'id.vk.com')
         row = self.store.db.execute('SELECT * FROM oauth_states').fetchone()
@@ -206,6 +211,69 @@ class OAuthTests(unittest.IsolatedAsyncioTestCase):
             import json
             target = json.loads(keys['buttons'][0][0]['action']['payload'])
             self.assertEqual(target, {'action': 'menu', 'screen': 'compose', 'project': self.project})
+        finally:
+            await client.close()
+
+    async def test_start_page_uses_registered_site_and_does_not_consume_state(self):
+        state = self.state()
+        client = TestClient(TestServer(create_web_app(self.manager)))
+        await client.start_server()
+        try:
+            for _ in range(2):
+                response = await client.get('/oauth/vk/callback', params={'start': '1', 'state': state})
+                self.assertEqual(response.status, 200)
+                self.assertEqual(response.content_type, 'text/html')
+                self.assertEqual(response.headers['Cache-Control'], 'no-store')
+                body = await response.text()
+                self.assertIn('referrerpolicy="origin"', body)
+                url = unescape(re.search(r'href="([^"]+)"', body).group(1))
+                self.assertEqual(urlsplit(url).hostname, 'id.vk.com')
+                params = parse_qs(urlsplit(url).query)
+                self.assertEqual(params['client_id'], ['12345'])
+                self.assertEqual(params['redirect_uri'], [self.settings.oauth_redirect])
+                self.assertEqual(params['state'], [state])
+                row = self.store.db.execute('SELECT * FROM oauth_states').fetchone()
+                self.assertEqual(row['status'], 'pending')
+                self.assertNotIn(self.manager.vault.decrypt(row['verifier']), body)
+                self.provider.exchange.assert_not_awaited()
+            response = await client.get('/oauth/vk/callback', params={'state': state, 'code': 'code', 'device_id': 'device'})
+            self.assertEqual(response.status, 200)
+            response = await client.get('/oauth/vk/callback', params={'start': '1', 'state': state})
+            self.assertEqual(response.status, 400)
+        finally:
+            await client.close()
+
+    async def test_start_page_rejects_expired_replaced_and_revoked_links(self):
+        old = self.state()
+        current = self.state()
+        client = TestClient(TestServer(create_web_app(self.manager)))
+        await client.start_server()
+        try:
+            response = await client.get('/oauth/vk/callback', params={'start': '1', 'state': old})
+            self.assertEqual(response.status, 400)
+            self.clock[0] += 601
+            response = await client.get('/oauth/vk/callback', params={'start': '1', 'state': current})
+            self.assertEqual(response.status, 400)
+            current = self.state()
+            self.store.set_member(42, self.project, 42, False, 42)
+            response = await client.get('/oauth/vk/callback', params={'start': '1', 'state': current})
+            self.assertEqual(response.status, 400)
+            self.provider.exchange.assert_not_awaited()
+        finally:
+            await client.close()
+
+    async def test_start_parameters_cannot_mix_with_code_or_repeat(self):
+        state = self.state()
+        client = TestClient(TestServer(create_web_app(self.manager)))
+        await client.start_server()
+        try:
+            for params in ([('state', state), ('start', '1'), ('code', 'private-code')],
+                           [('state', state), ('start', '1'), ('start', '1')],
+                           [('state', state), ('start', 'unexpected')]):
+                response = await client.get('/oauth/vk/callback', params=params)
+                self.assertEqual(response.status, 400)
+                self.assertNotIn('private-code', await response.text())
+            self.provider.exchange.assert_not_awaited()
         finally:
             await client.close()
 
