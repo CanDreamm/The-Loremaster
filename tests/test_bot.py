@@ -61,6 +61,182 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
         await self.send('/vk 123')
         return self.store.project(42)['id']
 
+    async def click(self, label, user=42):
+        for message in reversed(self.client.sent):
+            if message['peer'] != user:
+                continue
+            for row in (message.get('keyboard') or {}).get('buttons', []):
+                for item in row:
+                    if item['action'].get('label') == label:
+                        return await self.send(user=user, payload=json.loads(item['action']['payload']))
+        self.fail(f'Button not found: {label}')
+
+    async def test_menu_add_select_compose_and_revise_without_commands(self):
+        await self.send('/start')
+        await self.click('Добавить сообщество')
+        await self.send('Моя кофейня')
+        await self.send('https://vk.ru/club123')
+        project = self.store.project(42)
+        self.assertEqual(project['vk_group'], 123)
+        self.assertIn('500', project['text_prompt'])
+        self.assertEqual(len(self.store.projects(42)), 1)
+        self.app.text_ai.generate = AsyncMock(return_value='Короткий текст о кофе')
+        await self.click('Написать текст')
+        await self.send('Расскажи о новом сорте кофе')
+        job = self.store.job(42)
+        self.assertEqual(job['status'], 'review')
+        self.app.text_ai.generate.assert_awaited_once()
+        self.assertIn('500', self.app.text_ai.generate.call_args.args[0])
+        await self.click('Изменить текст')
+        self.app.text_ai.generate.return_value = 'Ещё короче'
+        await self.send('Сократи до одного предложения')
+        self.assertEqual(self.store.job(42)['revision'], 2)
+        self.assertEqual(self.store.revision(42, job['id'])['body'], 'Ещё короче')
+        await self.click('Назад')
+        await self.click('Другие сообщества')
+        await self.click(f"Моя кофейня · №{project['id']}")
+        self.assertEqual(self.store.project(42)['id'], project['id'])
+        self.publish.assert_not_awaited()
+
+    async def test_add_wizard_invalid_group_can_be_retried_without_empty_projects(self):
+        await self.send('/start')
+        await self.click('Добавить сообщество')
+        await self.send('Кофейня')
+        await self.send('https://other.example.com/club123')
+        self.assertEqual(self.store.projects(42), [])
+        self.assertEqual(self.store.dialog(42)['kind'], 'add_group')
+        await self.send('123')
+        self.assertEqual(self.store.project(42)['vk_group'], 123)
+
+    async def test_add_wizard_resolves_short_name_and_rejects_personal_profile(self):
+        self.client.api = AsyncMock(return_value={'type': 'user', 'object_id': 99})
+        await self.send('/start')
+        await self.click('Добавить сообщество')
+        await self.send('Кофейня')
+        await self.send('https://vk.com/mycoffee')
+        self.assertEqual(self.store.projects(42), [])
+        self.client.api.return_value = {'type': 'group', 'object_id': 123}
+        await self.send('https://vk.com/mycoffee')
+        self.client.api.assert_awaited_with('utils.resolveScreenName', screen_name='mycoffee')
+        self.assertEqual(self.store.project(42)['vk_group'], 123)
+
+    async def test_home_cancels_prompt_and_plain_text_does_not_start_generation(self):
+        project = await self.setup_project()
+        await self.send(payload={'action': 'menu', 'screen': 'compose', 'project': project})
+        await self.send('/menu')
+        await self.send('Это не задание')
+        self.assertEqual(self.store.jobs(42), [])
+        self.assertIsNone(self.store.dialog(42))
+
+    async def test_prompt_survives_store_and_bot_restart(self):
+        project = await self.setup_project()
+        await self.send(payload={'action': 'menu', 'screen': 'compose', 'project': project})
+        self.store.db.close()
+        self.store = Store(self.settings.database)
+        self.app = VkBot(self.settings, self.store, self.client)
+        await self.send('Напиши про кофе')
+        self.assertEqual(self.store.job(42)['brief'], 'Напиши про кофе')
+        self.assertIsNone(self.store.dialog(42))
+
+    async def test_revoked_project_access_blocks_pending_prompt(self):
+        project = await self.setup_project()
+        await self.send('/allow 99')
+        await self.send(f'/assign {project} 99')
+        await self.send(user=99, payload={'action': 'menu', 'screen': 'compose', 'project': project})
+        await self.send(f'/unassign {project} 99')
+        await self.send('Чужое задание', user=99)
+        self.assertEqual(self.store.jobs(42), [])
+
+    async def test_stale_revision_prompt_cannot_revise_new_version(self):
+        await self.setup_project()
+        await self.send('/post Кофе')
+        job = self.store.job(42)
+        await self.click('Изменить текст')
+        self.store.revise(42)
+        self.store.save_version(42, job['id'], 2, 'Другая версия', True)
+        await self.send('Замечание к старой версии')
+        self.assertEqual(self.store.job(42)['revision'], 2)
+        self.assertEqual(self.store.revision(42, job['id'])['body'], 'Другая версия')
+
+    async def test_old_edit_button_keeps_job_and_project_bound(self):
+        first = await self.setup_project()
+        await self.send('/post Первый текст')
+        job = self.store.job(42)
+        await self.send('/new Второй')
+        await self.send('/vk 456')
+        await self.send(payload={'action': 'edittext', 'job': job['id'], 'revision': 1})
+        await self.send('Короче')
+        self.assertEqual(self.store.project(42)['id'], first)
+        self.assertEqual(self.store.job(42)['id'], job['id'])
+        self.assertEqual(self.store.job(42)['revision'], 2)
+
+    async def test_menu_photo_replacement_preserves_text(self):
+        await self.setup_project()
+        await self.send('/post Кофе')
+        job = self.store.job(42)
+        previous = self.store.revision(42, job['id'])['body']
+        await self.click('Добавить фото')
+        await self.send('Без фото')
+        self.assertEqual(self.store.job(42)['revision'], 1)
+        await self.send(photo=True)
+        self.assertEqual(self.store.job(42)['revision'], 2)
+        self.assertEqual(self.store.revision(42, job['id'])['body'], previous)
+        self.assertTrue(self.store.revision(42, job['id'])['image_path'])
+
+    async def test_community_pages_fit_vk_inline_limits(self):
+        for index in range(10):
+            self.store.create_project(42, f'Сообщество {index}')
+        await self.send('/projects')
+        first_page = self.client.sent[-1]['keyboard']
+        await self.click('Далее')
+        second_page = self.client.sent[-1]['keyboard']
+        for keys in (first_page, second_page):
+            self.assertLessEqual(len(keys['buttons']), 6)
+            self.assertLessEqual(sum(map(len, keys['buttons'])), 10)
+        self.assertNotEqual(first_page['buttons'][0], second_page['buttons'][0])
+
+    async def test_member_cannot_forge_admin_or_add_menus(self):
+        await self.send('/allow 99')
+        for screen in ('admin', 'admin_allow', 'add'):
+            await self.send(user=99, payload={'action': 'menu', 'screen': screen})
+        self.assertEqual(self.store.projects(99), [])
+        self.assertIsNone(self.store.dialog(99))
+        self.assertFalse(self.store.is_allowed(88, 42))
+
+    async def test_admin_access_menu_prompts_for_id(self):
+        await self.send('/start')
+        await self.click('Управление доступом')
+        await self.click('Разрешить доступ')
+        await self.send('99')
+        self.assertTrue(self.store.is_allowed(99, 42))
+
+    async def test_text_settings_menu_saves_plain_input(self):
+        project = await self.setup_project()
+        await self.send(f'/select {project}')
+        await self.click('Настройки текста')
+        await self.click('Тон общения')
+        await self.send('Дружелюбный')
+        self.assertEqual(self.store.project(42)['tone'], 'Дружелюбный')
+        self.assertIsNone(self.store.dialog(42))
+
+    async def test_back_from_revision_restores_preview_without_changing_text(self):
+        await self.setup_project()
+        await self.send('/post Кофе')
+        job = self.store.job(42)
+        await self.click('Изменить текст')
+        await self.click('Назад к тексту')
+        self.assertIsNone(self.store.dialog(42))
+        self.assertEqual(self.store.job(42)['revision'], 1)
+        self.assertEqual(self.store.job(42)['status'], 'review')
+
+    async def test_forged_menu_cannot_select_unassigned_project(self):
+        project = await self.setup_project()
+        await self.send('/allow 99')
+        await self.send(user=99, payload={'action': 'menu', 'screen': 'workspace', 'project': project})
+        await self.send(user=99, payload={'action': 'menu', 'screen': 'compose', 'project': project})
+        self.assertIsNone(self.store.dialog(99))
+        self.assertEqual(self.store.projects(99), [])
+
     async def test_create_review_and_revise(self):
         await self.setup_project()
         await self.send('/concept Кофейня')

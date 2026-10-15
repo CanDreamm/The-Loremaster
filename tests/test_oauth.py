@@ -80,6 +80,27 @@ class OAuthTests(unittest.IsolatedAsyncioTestCase):
             await self.complete(old)
         await self.complete(new)
 
+    async def test_new_link_during_validation_prevents_old_connection(self):
+        started, release = asyncio.Event(), asyncio.Event()
+
+        async def validate(*args):
+            started.set()
+            await release.wait()
+
+        self.provider.validate.side_effect = validate
+        old = asyncio.create_task(self.complete(self.state()))
+        await started.wait()
+        try:
+            new = self.state()
+            self.provider.validate.side_effect = None
+            self.provider.exchange.return_value = {'access_token': 'new-connection-token'}
+            await self.complete(new)
+        finally:
+            release.set()
+            with self.assertRaises(Conflict):
+                await old
+        self.assertEqual(self.manager.token_for(42, self.project, 123), 'new-connection-token')
+
     async def test_unassigned_user_cannot_start_connection(self):
         self.store.set_access(42, 99, True, 42)
         with self.assertRaises(Conflict):
@@ -181,6 +202,10 @@ class OAuthTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn('private-code', body)
             self.assertNotIn('private-user-test-token', str(notify.call_args))
             notify.assert_awaited_once()
+            keys = notify.call_args.kwargs['keyboard']
+            import json
+            target = json.loads(keys['buttons'][0][0]['action']['payload'])
+            self.assertEqual(target, {'action': 'menu', 'screen': 'compose', 'project': self.project})
         finally:
             await client.close()
 
@@ -202,6 +227,8 @@ class OAuthTests(unittest.IsolatedAsyncioTestCase):
             [{'id': 99}],
             [{'id': 42}, 4],
             [{'id': 42}, 8196, {'groups': [{'id': 123, 'is_admin': 1, 'admin_level': 1}]}],
+            [{'id': 42}, 8196, {'groups': [{'id': 123, 'is_admin': 1}]}],
+            [{'id': 42}, 8196, {'groups': [{'id': 123, 'is_admin': 1, 'admin_level': 4}]}],
             [{'id': 42}, 8196, {'groups': [{'id': 999, 'is_admin': 1, 'admin_level': 3}]}],
         ]
         for responses in cases:

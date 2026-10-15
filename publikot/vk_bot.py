@@ -4,9 +4,11 @@ import uuid
 
 from .providers import AmbiguousPublish, ProviderError, VkPublisher, YandexText
 from .store import Conflict
+from .menus import BotMenus, button as menu_button, keyboard, back
 
 HELP = (
     'Публикот — помощник публикаций\n'
+    '/menu — главное меню\n'
     '/id — ваш ID ВК\n/projects — назначенные проекты\n/select НОМЕР — выбрать\n'
     '/settings — настройки\n/concept Описание\n/tone Тон общения\n'
     '/textprompt Промпт текста\n/imageprompt Промпт картинки\n/style Визуальный стиль\n'
@@ -22,16 +24,19 @@ HELP = (
 ADMIN_HELP = '\nАдминистратор: /new Название, /allow ID, /deny ID, /users, /allprojects, /assign ПРОЕКТ ID, /unassign ПРОЕКТ ID, /members ПРОЕКТ.'
 
 
-def preview_keyboard(job):
+def preview_keyboard(job, is_demo=False):
     def button(label, action, color='secondary'):
         payload = json.dumps({'action': action, 'job': job['id'], 'revision': job['revision']})
         return {'action': {'type': 'text', 'label': label, 'payload': payload}, 'color': color}
-    return {'inline': True, 'buttons': [
-        [button('Опубликовать', 'publish', 'positive'), button('Отменить', 'cancel', 'negative')],
-        [button('Изменить текст', 'edittext'), button('Изменить изображение', 'editimage')]]}
+    rows = [[button('Изменить текст', 'edittext'),
+             button('Заменить фото' if job['image_path'] else 'Добавить фото', 'editimage')]]
+    rows.append(([button('Опубликовать', 'publish', 'positive')] if not is_demo and job['target_group'] else [])
+                + [button('Отменить черновик', 'cancel', 'negative')])
+    rows.append(back(job['project_id']))
+    return keyboard(*rows)
 
 
-class VkBot:
+class VkBot(BotMenus):
     def __init__(self, settings, store, client, text_ai=None, publisher_factory=VkPublisher, oauth=None):
         self.settings, self.store, self.client = settings, store, client
         self.text_ai = text_ai or YandexText(settings.yandex_key, settings.yandex_folder, settings.demo)
@@ -68,13 +73,18 @@ class VkBot:
                 except (ValueError, TypeError, KeyError):
                     await self.client.send(peer, 'Кнопка некорректна. Откройте /status заново.')
             else:
-                await self.command(actor, peer, command, args.strip(), message)
+                if command.startswith('/') or command in ('начать', 'начать работу', 'меню'):
+                    self.store.set_dialog(actor, None)
+                    await self.command(actor, peer, command, args.strip(), message)
+                elif not await self.dialog_input(actor, peer, text, message):
+                    await self.home(actor, peer)
         except (Conflict, ProviderError) as error:
-            await self.client.send(peer, str(error))
+            await self.client.send(peer, str(error), keyboard=keyboard(back()))
         except ValueError:
-            await self.client.send(peer, 'Проверьте числовые ID и аргументы команды. Справка: /help.')
+            await self.client.send(peer, 'Проверьте числовые ID и аргументы команды. Справка: /help.', keyboard=keyboard(back()))
         except sqlite3.IntegrityError:
-            await self.client.send(peer, 'Запись уже существует. Проверьте /projects или /status.')
+            await self.client.send(peer, 'Запись уже существует. Выберите другое название или откройте список сообществ.',
+                                   keyboard=keyboard([menu_button('Мои сообщества', 'communities')], back()))
         except Exception:
             self.store.end_event(key, False)
             raise
@@ -110,12 +120,20 @@ class VkBot:
             await self.client.send_photo(peer, version['image_path'])
         await self.client.send(peer, version['body'])
         if job['status'] == 'review':
-            await self.client.send(peer, 'Подтвердите эту версию или внесите изменения.', keyboard=preview_keyboard(job))
+            await self.client.send(peer, 'Текст готов. Можно внести замечания.' if version['is_demo']
+                                   else 'Текст готов. Публикация — только после вашего подтверждения.',
+                                   keyboard=preview_keyboard(job, bool(version['is_demo'])))
+        else:
+            await self.client.send(peer, 'Выберите следующее действие.', keyboard=keyboard(back(job['project_id'])))
 
     async def command(self, actor, peer, command, args, message):
         s, admin = self.store, self.settings.owner_id
-        if command in ('/start', '/help', 'начать', 'начать работу'):
-            return await self.client.send(peer, HELP + (ADMIN_HELP if actor == admin else '') + ('\n\nДемо-режим: запросы к ИИ не выполняются.' if self.settings.demo else ''))
+        if command in ('/start', '/menu', 'начать', 'начать работу', 'меню'):
+            return await self.home(actor, peer)
+        if command == '/help':
+            return await self.client.send(peer, HELP + (ADMIN_HELP if actor == admin else '')
+                                          + ('\n\nДемо-режим: запросы к ИИ не выполняются.' if self.settings.demo else ''),
+                                          keyboard=keyboard(back()))
         if command in ('/allow', '/deny', '/users', '/allprojects', '/new', '/assign', '/unassign', '/members'):
             if actor != admin:
                 raise Conflict('Эта команда доступна только администратору.')
@@ -138,25 +156,23 @@ class VkBot:
             s.set_member(actor, project, user, command == '/assign', admin)
             return await self.client.send(peer, 'Назначения обновлены.')
         if command == '/projects':
-            rows = s.projects(actor)
-            return await self.client.send(peer, '\n'.join(f"№{p['id']} — {p['name']}" for p in rows) or 'Назначенных проектов нет. Обратитесь к администратору.')
+            return await self.communities(actor, peer)
         if command == '/select':
-            s.select(actor, int(args))
-            keyboard = {'inline': True, 'buttons': [[{'action': {'type': 'text', 'label': 'Подключить сообщество', 'payload': json.dumps({'action': 'connect', 'project': int(args)})}, 'color': 'primary'}]]}
-            return await self.client.send(peer, 'Проект выбран. /settings — настройки, /post Тема — новый пост.', keyboard=keyboard)
+            return await self.workspace(actor, peer, int(args))
         if command == '/connect':
             return await self.connect(actor, peer, s.project(actor)['id'])
         if command == '/connection':
             project = s.project(actor)
             row = self.oauth.status(actor, project['id']) if self.oauth else None
             if row:
-                state = row['status']
+                state = {'active': 'подключено', 'disconnected': 'отключено'}.get(row['status'], 'не подключено')
                 if row['group_id'] != project['vk_group']:
-                    state = 'сообщество изменилось — требуется /connect'
-                elif row['expires_at'] and row['expires_at'] <= self.oauth.now():
-                    state = 'срок ключа истёк — требуется /connect'
-                return await self.client.send(peer, f"OAuth проекта №{project['id']}: {state}. Сообщество: {row['group_id']}. Авторизовал пользователь: {row['actor']}.")
-            return await self.client.send(peer, 'Подключения OAuth нет. Выполните /connect. Ранее заданные вручную ключи проверяются отдельно.')
+                    state = 'сообщество изменилось — подключите ВК заново'
+                elif row['status'] == 'active' and row['expires_at'] and row['expires_at'] <= self.oauth.now():
+                    state = 'срок доступа истёк — подключите ВК заново'
+                return await self.client.send(peer, f"Публикации: {state}. Сообщество: {row['group_id']}.")
+            return await self.client.send(peer, 'ВК ещё не подключён через приложение. Для публикаций нажмите «Авторизоваться в ВК». '
+                                          'Ранее заданные вручную ключи проверяются отдельно.')
         if command == '/disconnect':
             project = s.project(actor)
             if not self.oauth:
@@ -176,9 +192,7 @@ class VkBot:
             s.configure(actor, 'vk_group', group)
             return await self.client.send(peer, 'Сообщество публикаций сохранено. Для авторизации отправьте /connect. Старое OAuth-подключение к другому сообществу не используется.')
         if command == '/settings':
-            project = s.project(actor)
-            labels = {'concept': 'Концепция', 'tone': 'Тон', 'text_prompt': 'Промпт текста', 'image_prompt': 'Промпт картинки', 'visual_style': 'Визуальный стиль', 'vk_group': 'Сообщество публикаций'}
-            return await self.client.send(peer, f"Проект №{project['id']} — {project['name']}\n" + '\n\n'.join(f'{label}: {project[field] or "не задано"}' for field, label in labels.items()))
+            return await self.menu(actor, peer, {'screen': 'settings', 'project': s.project(actor)['id']})
         if command in ('/reference', '/references', '/character', '/characters'):
             project = s.project(actor)
             if command == '/references':
@@ -213,8 +227,7 @@ class VkBot:
             s.replace_image(actor, job['id'], job['revision'], path)
             return await self.preview(actor, peer, job['id'])
         if command == '/jobs':
-            rows = s.jobs(actor)
-            return await self.client.send(peer, '\n'.join(f"№{j['id']}, версия {j['revision']}: {j['status']}" for j in rows) or 'Заданий нет.')
+            return await self.menu(actor, peer, {'screen': 'jobs', 'project': s.project(actor)['id']})
         if command in ('/job', '/status'):
             if command == '/job':
                 s.select_job(actor, int(args))
@@ -255,10 +268,14 @@ class VkBot:
         if not self.oauth:
             raise Conflict('Авторизация пока не настроена администратором. Нужны приложение ВК и публичный HTTPS-адрес возврата.')
         url = self.oauth.begin(actor, project_id)
-        keyboard = {'inline': True, 'buttons': [[{'action': {'type': 'open_link', 'label': 'Авторизоваться в ВК', 'link': url}}]]}
-        await self.client.send(peer, f"Подключение проекта №{project_id} — {project['name']}, сообщество {project['vk_group']}.\nВойдите тем аккаунтом ВК, из которого пишете боту. Ключ останется на сервере и разрешит публикации всем назначенным участникам этого проекта. Ссылка действует 10 минут.", keyboard=keyboard)
+        keys = keyboard([{'action': {'type': 'open_link', 'label': 'Авторизоваться в ВК', 'link': url}}],
+                        [menu_button('Проверить подключение', 'connection', project=project_id)], back(project_id))
+        await self.client.send(peer, f"Подключение проекта №{project_id} — {project['name']}, сообщество {project['vk_group']}.\nВойдите тем аккаунтом ВК, из которого пишете боту. Ключ останется на сервере и разрешит публикации всем назначенным участникам этого проекта. Ссылка действует 10 минут.", keyboard=keys)
 
     async def action(self, actor, peer, payload):
+        if payload.get('action') == 'menu':
+            return await self.menu(actor, peer, payload)
+        self.store.set_dialog(actor, None)
         if payload.get('action') == 'connect':
             return await self.connect(actor, peer, int(payload['project']))
         action, ident, revision = payload['action'], int(payload['job']), int(payload['revision'])
@@ -266,12 +283,13 @@ class VkBot:
         job = s.expect_review(actor, ident, revision)
         if action == 'cancel':
             s.cancel(actor, ident, revision)
-            return await self.client.send(peer, 'Задание отменено.')
+            return await self.client.send(peer, 'Задание отменено.', keyboard=keyboard(back(job['project_id'])))
         if action in ('edittext', 'editimage'):
             s.select_job(actor, ident)
-            text = ('Отправьте /revise Ваши замечания — изменится только текст.' if action == 'edittext'
-                    else f'Прикрепите новое фото с подписью /image {ident}. Текст сохранится. Генерация изображений ИИ пока не подключена.')
-            return await self.client.send(peer, text)
+            text = ('Что изменить в тексте? Отправьте замечания одним сообщением.' if action == 'edittext'
+                    else 'Прикрепите новое фото. Текст поста сохранится.')
+            return await self.prompt(actor, peer, {'kind': 'revise' if action == 'edittext' else 'image',
+                'project': job['project_id'], 'job': ident, 'revision': revision}, text)
         if action != 'publish':
             raise Conflict('Неизвестная кнопка.')
         project = s.require(actor, job['project_id'])
@@ -296,4 +314,4 @@ class VkBot:
             s.finish(actor, ident, 'unknown')
             raise ProviderError('Результат публикации неизвестен. Проверьте стену; повтора не будет.') from None
         s.finish(actor, ident, 'published', url)
-        await self.client.send(peer, 'Опубликовано: ' + url)
+        await self.client.send(peer, 'Опубликовано: ' + url, keyboard=keyboard(back(job['project_id'])))

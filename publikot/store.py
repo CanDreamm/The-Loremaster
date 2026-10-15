@@ -1,3 +1,4 @@
+import json
 import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
@@ -43,6 +44,9 @@ class Store:
         CREATE TABLE IF NOT EXISTS sessions (
           owner INTEGER PRIMARY KEY, project_id INTEGER REFERENCES projects(id), job_id INTEGER
         );
+        CREATE TABLE IF NOT EXISTS ui_dialogs (
+          actor INTEGER PRIMARY KEY, state TEXT NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS jobs (
           id INTEGER PRIMARY KEY, owner INTEGER NOT NULL, project_id INTEGER NOT NULL REFERENCES projects(id),
           brief TEXT NOT NULL, image_path TEXT, revision INTEGER NOT NULL DEFAULT 1,
@@ -87,6 +91,17 @@ class Store:
 
     def begin_event(self, event_id):
         return self.db.execute("INSERT OR IGNORE INTO inbox VALUES (?,'processing')", (event_id,)).rowcount == 1
+
+    def dialog(self, actor):
+        row = self.db.execute('SELECT state FROM ui_dialogs WHERE actor=?', (actor,)).fetchone()
+        return json.loads(row['state']) if row else None
+
+    def set_dialog(self, actor, state):
+        if state is None:
+            self.db.execute('DELETE FROM ui_dialogs WHERE actor=?', (actor,))
+        else:
+            self.db.execute('INSERT INTO ui_dialogs VALUES (?,?) ON CONFLICT(actor) DO UPDATE SET state=excluded.state',
+                            (actor, json.dumps(state, ensure_ascii=False)))
 
     def end_event(self, event_id, success):
         self.db.execute('UPDATE inbox SET status=? WHERE event_id=?', ('done' if success else 'failed', event_id))

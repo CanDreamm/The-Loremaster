@@ -20,7 +20,9 @@ class YandexText:
             return '[ДЕМО — без обращения к ИИ]\n' + brief + ('\nЗамечание: ' + feedback if feedback else '')
         if not self.key or not self.folder:
             raise ProviderError('Не настроены YANDEX_API_KEY и YANDEX_FOLDER_ID.')
-        system = 'Ты редактор публикаций ВК. Верни только текст поста без пояснений. Не выдумывай факты. Концепция проекта:\n' + concept
+        system = ('Ты редактор публикаций ВК. По умолчанию пиши короткий пост до 500 символов, '
+                  'если в задании или правилах проекта не указан другой объём. '
+                  'Верни только текст поста без пояснений. Не выдумывай факты. Концепция проекта:\n') + concept
         user = brief + ('\nПредыдущий вариант:\n' + previous + '\nИсправления:\n' + feedback if previous else '')
         try:
             async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=90)) as session:

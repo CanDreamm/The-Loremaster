@@ -14,6 +14,7 @@ from cryptography.fernet import Fernet, InvalidToken
 from .providers import ProviderError
 from .settings import ConfigError
 from .store import Conflict
+from .menus import button, keyboard
 
 SECURE_HEADERS = {
     'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer',
@@ -105,7 +106,7 @@ class VkOAuthProvider:
         if not isinstance(groups, list) or len(groups) != 1:
             raise ProviderError('Не удалось проверить сообщество.')
         selected = groups[0]
-        if selected.get('id') != group or not selected.get('is_admin') or selected.get('admin_level', 3) < 2:
+        if selected.get('id') != group or not selected.get('is_admin') or selected.get('admin_level', 0) not in (2, 3):
             raise ProviderError('Для публикации нужны права редактора или администратора выбранного сообщества.')
 
 
@@ -143,7 +144,7 @@ class OAuthManager:
         digest = hashlib.sha256(state.encode()).hexdigest()
         expiry = int(self.now()) + 600
         with self.store.transaction():
-            self.db.execute("UPDATE oauth_states SET status='failed',verifier='' WHERE actor=? AND project_id=? AND status='pending'", (actor, project_id))
+            self.db.execute("UPDATE oauth_states SET status='failed',verifier='' WHERE actor=? AND project_id=? AND status IN ('pending','processing')", (actor, project_id))
             self.db.execute('INSERT INTO oauth_states(state_hash,actor,project_id,group_id,expires_at,verifier) VALUES (?,?,?,?,?,?)', (digest, actor, project_id, project['vk_group'], expiry, self.vault.encrypt(verifier)))
         params = {'client_id': self.settings.oauth_client_id, 'redirect_uri': self.settings.oauth_redirect,
                   'response_type': 'code', 'state': state}
@@ -231,7 +232,9 @@ def create_web_app(manager, notify=None):
             return web.Response(status=400, text='Подключение не завершено. Повторите /connect в боте.', headers=SECURE_HEADERS)
         if notify:
             try:
-                await notify(row['actor'], f"Сообщество {row['group_id']} подключено к проекту №{row['project_id']}. Ключ сохранён на сервере и не передаётся в чат.")
+                await notify(row['actor'], f"Сообщество {row['group_id']} подключено к проекту №{row['project_id']}. Теперь можно готовить текст.",
+                             keyboard=keyboard([button('Написать текст', 'compose', project=row['project_id'])],
+                                               [button('Меню сообщества', 'workspace', project=row['project_id'])]))
             except Exception:
                 pass  # Подключение сохранено; доставка уведомления не должна его отменять.
         return web.Response(text='Сообщество подключено. Вернитесь в сообщения бота. Проверить статус: /connection.', headers=SECURE_HEADERS)
