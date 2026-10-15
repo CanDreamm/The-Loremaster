@@ -26,7 +26,8 @@ class OAuthTests(unittest.IsolatedAsyncioTestCase):
         self.store.configure(42, 'vk_group', 123)
         self.clock = [1000]
         self.provider = VkOAuthProvider(self.settings, None)
-        self.provider.exchange = AsyncMock(return_value={'access_token': 'private-user-test-token', 'expires_in': 3600})
+        self.provider.exchange = AsyncMock(return_value={'access_token': 'private-user-test-token', 'expires_in': 3600,
+                                                        'user_id': 42, 'scope': 'wall photos'})
         self.provider.validate = AsyncMock()
         self.manager = OAuthManager(self.settings, self.store, self.provider, now=lambda: self.clock[0])
 
@@ -46,7 +47,8 @@ class OAuthTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn('private-user-test-token', row['token'])
         self.assertEqual(self.manager.token_for(42, self.project, 123), 'private-user-test-token')
         self.assertEqual((self.settings.data_dir/'oauth.key').stat().st_mode & 0o777, 0o600)
-        self.provider.validate.assert_awaited_once_with('private-user-test-token', 42, 123)
+        self.provider.validate.assert_awaited_once_with('private-user-test-token', 42, 123,
+                                                       self.provider.exchange.return_value)
 
     async def test_pkce_verifier_is_not_in_authorization_link_or_plain_db(self):
         url = self.manager.begin(42, self.project)
@@ -166,7 +168,7 @@ class OAuthTests(unittest.IsolatedAsyncioTestCase):
             response = await client.get('/oauth/vk/callback', params={'state': self.state(), 'code': 'private-code', 'device_id': 'device'})
             self.assertEqual(response.status, 400)
             body = await response.text()
-            self.assertIn('account.getProfileInfo', body)
+            self.assertIn('groups.getById', body)
             self.assertIn('код API 15', body)
             self.assertNotIn('private-code', body)
             self.assertNotIn('private-user-test-token', body)
@@ -261,7 +263,7 @@ class OAuthTests(unittest.IsolatedAsyncioTestCase):
             await client.close()
 
     async def test_real_provider_rejects_wrong_user_missing_scopes_and_moderator(self):
-        provider = VkOAuthProvider(self.settings, None)
+        provider = VkOAuthProvider(replace(self.settings, oauth_provider='vk_api'), None)
         cases = [
             [{'id': 99}],
             [{'id': 42}, 4],
@@ -276,6 +278,43 @@ class OAuthTests(unittest.IsolatedAsyncioTestCase):
                 await provider.validate('test-token', 42, 123)
         provider.api = AsyncMock(side_effect=[{'id': 42}, 8196, {'groups': [{'id': 123, 'is_admin': 1, 'admin_level': 2}]}])
         await provider.validate('test-token', 42, 123)
+
+    async def test_vkid_uses_documented_token_identity_and_scopes(self):
+        provider = VkOAuthProvider(self.settings, None)
+        provider.api = AsyncMock(return_value={'groups': [{'id': 123, 'is_admin': 1, 'admin_level': 2}]})
+        for identity in (42, '42'):
+            provider.api.reset_mock()
+            await provider.validate('test-token', 42, 123,
+                {'access_token': 'test-token', 'user_id': identity, 'scope': 'vkid.personal_info wall photos'})
+            provider.api.assert_awaited_once_with('test-token', 'groups.getById', group_id=123)
+
+    async def test_vkid_rejects_wrong_identity_or_missing_scopes_before_api_calls(self):
+        provider = VkOAuthProvider(self.settings, None)
+        provider.api = AsyncMock()
+        valid = {'access_token': 'test-token', 'user_id': 42, 'scope': 'wall photos'}
+        cases = [None, {**valid, 'user_id': 99}, {**valid, 'user_id': True},
+                 {**valid, 'user_id': None}, {**valid, 'access_token': 'other-token'},
+                 {**valid, 'scope': None}, {**valid, 'scope': 'vkid.personal_info'},
+                 {**valid, 'scope': 'photos'}, {**valid, 'scope': 'wall'}]
+        for authorization in cases:
+            with self.assertRaises(ProviderError):
+                await provider.validate('test-token', 42, 123, authorization)
+        provider.api.assert_not_awaited()
+
+    async def test_vkid_scopes_do_not_bypass_group_editor_check(self):
+        provider = VkOAuthProvider(self.settings, None)
+        provider.api = AsyncMock(return_value={'groups': [{'id': 123, 'is_admin': 1, 'admin_level': 1}]})
+        with self.assertRaises(ProviderError):
+            await provider.validate('test-token', 42, 123,
+                {'access_token': 'test-token', 'user_id': 42, 'scope': 'wall photos'})
+
+    async def test_real_vkid_validation_saves_only_checked_connection(self):
+        provider = VkOAuthProvider(self.settings, None)
+        provider.exchange = self.provider.exchange
+        provider.api = AsyncMock(return_value={'groups': [{'id': 123, 'is_admin': 1, 'admin_level': 3}]})
+        self.manager.provider = provider
+        await self.complete()
+        self.assertEqual(self.manager.token_for(42, self.project, 123), 'private-user-test-token')
 
     async def test_legacy_api_provider_does_not_put_client_secret_in_url(self):
         settings = replace(self.settings, oauth_provider='vk_api', oauth_client_secret='test-client-secret')

@@ -105,13 +105,36 @@ class VkOAuthProvider:
         except (aiohttp.ClientError, TimeoutError, ValueError):
             raise ProviderError(f'Не удалось выполнить проверку ВК: {safe_method}. Сетевая ошибка или некорректный JSON.') from None
 
-    async def validate(self, token, actor, group):
-        profile = await self.api(token, 'account.getProfileInfo')
-        if profile.get('id') != actor:
-            raise ProviderError('В браузере открыт другой аккаунт ВК. Войдите тем пользователем, который начал подключение.')
-        permissions = await self.api(token, 'account.getAppPermissions')
-        if not isinstance(permissions, int) or permissions & (8192 | 4) != (8192 | 4):
-            raise ProviderError('Приложение не выдало wall и photos. Вход VK ID сам по себе не разрешает публикации.')
+    async def validate(self, token, actor, group, authorization=None):
+        if self.settings.oauth_provider == 'vkid':
+            # VK ID returns user_id and a space-separated scope in its token
+            # response. Do not use legacy account.* calls to inspect this token.
+            if not isinstance(authorization, dict) or authorization.get('access_token') != token:
+                raise ProviderError('VK ID: нет подтверждённого ответа обмена кода. Повторите подключение.')
+            user_id = authorization.get('user_id')
+            if type(user_id) is int:
+                identity = user_id
+            elif isinstance(user_id, str) and user_id.isascii() and user_id.isdecimal():
+                identity = int(user_id)
+            else:
+                raise ProviderError('VK ID не вернул корректный user_id. Подключение не сохранено.')
+            if identity != actor:
+                raise ProviderError('В браузере открыт другой аккаунт ВК. Войдите тем пользователем, который начал подключение.')
+            scope = authorization.get('scope')
+            if not isinstance(scope, str):
+                raise ProviderError('VK ID не вернул список выданных разрешений scope. Подключение не сохранено.')
+            granted = set(scope.split())
+            if not {'wall', 'photos'} <= granted:
+                raise ProviderError('VK ID не выдал права публикации: '
+                    f'wall — {"да" if "wall" in granted else "нет"}, photos — {"да" if "photos" in granted else "нет"}. '
+                    'Нужен доступ приложения к этим API; вход в аккаунт сам по себе его не даёт.')
+        else:
+            profile = await self.api(token, 'account.getProfileInfo')
+            if profile.get('id') != actor:
+                raise ProviderError('В браузере открыт другой аккаунт ВК. Войдите тем пользователем, который начал подключение.')
+            permissions = await self.api(token, 'account.getAppPermissions')
+            if not isinstance(permissions, int) or permissions & (8192 | 4) != (8192 | 4):
+                raise ProviderError('Приложение не выдало wall и photos. Вход VK ID сам по себе не разрешает публикации.')
         groups = await self.api(token, 'groups.getById', group_id=group)
         if isinstance(groups, dict):
             groups = groups.get('groups', [])
@@ -190,7 +213,7 @@ class OAuthManager:
                 raise Conflict('ВК не передал код авторизации. Повторите /connect.')
             result = await self.provider.exchange(code, self.vault.decrypt(row['verifier']), device_id, state)
             token = result['access_token']
-            await self.provider.validate(token, row['actor'], row['group_id'])
+            await self.provider.validate(token, row['actor'], row['group_id'], result)
             lifetime = int(result.get('expires_in', 0))
             if lifetime < 0:
                 raise ProviderError('ВК выдал недействительный срок ключа.')
