@@ -61,8 +61,8 @@ class Settings:
             raise ConfigError('OWNER_VK_ID должен быть положительным числовым ID ВК')
         if require_owner and not owner:
             raise ConfigError('Задайте OWNER_VK_ID. Для определения ID: python -m publikot --identify')
-        client = os.getenv('VK_OAUTH_CLIENT_ID', '')
-        public = os.getenv('OAUTH_PUBLIC_URL', '').rstrip('/')
+        client = os.getenv('VK_OAUTH_CLIENT_ID', '54825414')
+        public = os.getenv('OAUTH_PUBLIC_URL', 'https://bot.itiscat.ru').rstrip('/')
         provider = os.getenv('VK_OAUTH_PROVIDER', 'vkid')
         secret = os.getenv('VK_OAUTH_CLIENT_SECRET', '')
         port = os.getenv('OAUTH_PORT', '8081')

@@ -23,6 +23,15 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(settings.database.name, 'publikot-vk.sqlite3')
         self.assertEqual(settings.owner_id, 42)
 
+    def test_deployed_app_defaults_and_explicit_oauth_disable(self):
+        base = {'VK_BOT_TOKEN': 'test-bot', 'OWNER_VK_ID': '42'}
+        settings = self.load(base)
+        self.assertTrue(settings.oauth_enabled)
+        self.assertEqual(settings.oauth_client_id, '54825414')
+        self.assertEqual(settings.oauth_redirect, 'https://bot.itiscat.ru/oauth/vk/callback')
+        disabled = self.load({**base, 'VK_OAUTH_CLIENT_ID': '', 'OAUTH_PUBLIC_URL': ''})
+        self.assertFalse(disabled.oauth_enabled)
+
     def test_telegram_identity_does_not_grant_vk_administration(self):
         with self.assertRaises(ConfigError):
             self.load({'VK_BOT_TOKEN': 'test-bot', 'OWNER_TELEGRAM_ID': '42'})
@@ -51,6 +60,28 @@ class SettingsTests(unittest.TestCase):
             self.assertEqual(settings.vk_token_for(99, 2), '')
         self.assertNotIn('bot-secret', repr(settings))
         self.assertNotIn('admin-secret', repr(settings))
+
+    def test_oauth_deployment_preserves_credentials_and_is_repeatable(self):
+        script = Path(__file__).resolve().parent.parent / 'scripts' / 'configure-oauth.py'
+        configure = runpy.run_path(str(script))['configure']
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = root / '.env.python'
+            config.write_text('VK_BOT_TOKEN=test-secret\nOWNER_VK_ID=42\n'
+                              'YANDEX_API_KEY=ai-secret\nVK_OAUTH_CLIENT_ID=\nOAUTH_PUBLIC_URL=\n')
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                configure(root)
+                configure(root)
+            values = dotenv_values(config)
+            self.assertEqual(values['VK_BOT_TOKEN'], 'test-secret')
+            self.assertEqual(values['YANDEX_API_KEY'], 'ai-secret')
+            self.assertEqual(values['OWNER_VK_ID'], '42')
+            self.assertEqual(values['VK_OAUTH_CLIENT_ID'], '54825414')
+            self.assertEqual(values['OAUTH_PUBLIC_URL'], 'https://bot.itiscat.ru')
+            self.assertEqual(config.stat().st_mode & 0o777, 0o600)
+            self.assertNotIn('test-secret', output.getvalue())
+            self.assertNotIn('ai-secret', output.getvalue())
 
     def test_setup_preserves_existing_values_and_unrelated_settings(self):
         source = Path(__file__).resolve().parent.parent / 'scripts' / 'setup-python.py'

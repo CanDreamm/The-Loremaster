@@ -1,9 +1,9 @@
 # Шаблон для отдельного домена. Не подключать без домена и сертификата.
 server {
     listen 443 ssl;
-    server_name bot.example.com;
-    ssl_certificate /etc/letsencrypt/live/bot.example.com/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/bot.example.com/privkey.pem;
+    server_name bot.itiscat.ru;
+    ssl_certificate /etc/letsencrypt/live/bot.itiscat.ru/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/bot.itiscat.ru/privkey.pem;
 
     location = /oauth/vk/callback {
         # Query содержит одноразовые code/state. Не журналировать запрос.

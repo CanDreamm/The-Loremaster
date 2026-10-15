@@ -50,22 +50,38 @@ wall/photos в SDK не гарантирует write-доступ нового V
 
 ## HTTPS и конфигурация
 
-Нужен домен/поддомен с HTTPS, направленный на VPS. В приложении зарегистрируйте
-точный redirect URI: https://bot.example.com/oauth/vk/callback (домен замените своим).
-В .env.python на сервере:
+Для ПублиКота зарегистрировано приложение **54825414** (Web) и адрес возврата:
+`https://bot.itiscat.ru/oauth/vk/callback`. Эти публичные параметры уже используются
+в коде по умолчанию и в `.env.python.example`. Права публикации приложения ещё
+нужно подтвердить реальной авторизацией; регистрация приложения их не доказывает.
 
-```dotenv
-VK_OAUTH_CLIENT_ID=ID_СВОЕГО_ПРИЛОЖЕНИЯ
-VK_OAUTH_PROVIDER=vkid
-OAUTH_PUBLIC_URL=https://bot.example.com
-OAUTH_PORT=8081
+Для установленного бота с существующим `.env.python` после получения обновления:
+
+```sh
+cd /opt/publikot
+.venv/bin/python scripts/configure-oauth.py
+.venv/bin/python -m unittest discover -s tests -v
+sudo systemctl restart publikot
+sudo systemctl status publikot --no-pager
 ```
 
-Для vk_api дополнительно VK_OAUTH_CLIENT_SECRET. Секреты вводятся только на сервере.
+Скрипт обновляет только четыре публичные настройки OAuth, не выводит и не меняет
+токены, ID администратора и остальные параметры. Повторный запуск допустим.
+Запускайте его от владельца `.env.python` (в стандартной установке —
+`sudo -u publikot .venv/bin/python scripts/configure-oauth.py`). Если используются
+свои OAuth-приложение или домен, не запускайте этот скрипт: существующие значения
+переменных окружения и `.env.python` имеют приоритет над настройками по умолчанию.
+Чтобы отключить OAuth, задайте пустыми оба параметра `VK_OAUTH_CLIENT_ID` и
+`OAUTH_PUBLIC_URL`. Для адаптера `vk_api` дополнительно нужен `VK_OAUTH_CLIENT_SECRET`.
+
 Порт 8081 слушает только 127.0.0.1. Снаружи нужен HTTPS reverse proxy.
-Шаблон: [oauth-nginx.conf.example](../deploy/oauth-nginx.conf.example).
-Это пример: сначала замените домен и пути сертификата, проверьте существующие
-конфиги. Не заменяйте конфиг n8n и не занимайте его домен без проверки.
+[Шаблон Nginx](../deploy/oauth-nginx.conf.example) подготовлен для `bot.itiscat.ru`.
+Он предполагает сертификат в `/etc/letsencrypt/live/bot.itiscat.ru/` — проверьте
+реальные пути на сервере. Наличие HTTPS само по себе не означает, что путь
+`/oauth/vk/callback` уже направлен на порт 8081. Если домен уже обслуживается
+существующим серверным блоком, добавьте в него только location callback из шаблона;
+не создавайте второй блок с тем же server_name и не заменяйте чужие конфигурации.
+Перед применением изменений Nginx выполните `sudo nginx -t`.
 
 На callback отключены access/error logs, чтобы code/state не попадали в журналы.
 В приложении access log отключён; секреты и сырые ответы провайдера не выводятся.
