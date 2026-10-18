@@ -266,7 +266,7 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(job['reference_path'])
         version = self.store.revision(42, job['id'])
         self.assertEqual(json.loads(version['prompt_materials']), [])
-        self.assertIn('с нуля', version['image_prompt'])
+        self.assertIn('Задание пользователя:\nКофе', version['image_prompt'])
 
     async def test_menu_add_select_compose_and_revise_without_commands(self):
         await self.send('/start')
