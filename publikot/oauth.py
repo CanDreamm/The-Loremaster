@@ -310,7 +310,7 @@ class OAuthManager:
         if not self.store.is_allowed(actor, self.settings.owner_id):
             raise Conflict('Доступ к боту отозван.')
 
-    def begin_import(self, actor):
+    def begin_import(self, actor, *, short=False):
         self.expire_imports()
         self.import_guard(actor)
         state, verifier = secrets.token_urlsafe(32), secrets.token_urlsafe(64)
@@ -320,6 +320,8 @@ class OAuthManager:
             self.db.execute('INSERT INTO oauth_imports(state_hash,actor,expires_at,verifier,flow) VALUES (?,?,?,?,?)',
                 (hashlib.sha256(state.encode()).hexdigest(), actor, int(self.now()) + 600,
                  '' if implicit else self.vault.encrypt(verifier), 'implicit' if implicit else 'code'))
+        if short:
+            return self.settings.oauth_public_url.rstrip('/') + '/oauth/vk/start?' + urlencode({'state': state})
         return self.authorization_url(state, verifier, include_groups=True)
 
     def expire_imports(self):
@@ -499,6 +501,18 @@ class OAuthManager:
 
 
 def create_web_app(manager, notify=None):
+    async def start(request):
+        try:
+            if len(request.query.getall('state', [])) != 1:
+                raise Conflict('Откройте «Мои сообщества» в боте и нажмите «Добавить сообщество» заново.')
+            state = request.query['state']
+            row = manager.import_session(state, 'pending')
+            verifier = '' if row['flow'] == 'implicit' else manager.vault.decrypt(row['verifier'])
+            raise web.HTTPFound(location=manager.authorization_url(state, verifier, include_groups=True),
+                                headers=SECURE_HEADERS)
+        except Conflict as error:
+            return web.Response(status=400, text=str(error), headers=SECURE_HEADERS)
+
     def is_import(state):
         if not isinstance(state, str) or not 32 <= len(state) <= 128:
             return False
@@ -619,6 +633,7 @@ def create_web_app(manager, notify=None):
         return web.Response(text='Сообщество подключено. Вернитесь в сообщения бота. Проверить статус: /connection.', headers=SECURE_HEADERS)
 
     app = web.Application(client_max_size=8192)
+    app.router.add_get('/oauth/vk/start', start)
     app.router.add_get('/oauth/vk/callback', callback)
     app.router.add_post('/oauth/vk/callback', callback)
     app.router.add_get('/oauth/vk/select', picker)

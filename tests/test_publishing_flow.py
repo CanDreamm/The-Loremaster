@@ -113,6 +113,10 @@ class PublishingFlowTests(unittest.IsolatedAsyncioTestCase):
         await self.send('/start')
         await self.click('Мои сообщества')
         url = await self.click('Добавить сообщество')
+        start_url = urlsplit(url)
+        response = await self.callback.get(start_url.path + '?' + start_url.query, allow_redirects=False)
+        self.assertEqual(response.status, 302)
+        url = response.headers['Location']
         params = parse_qs(urlsplit(url).query)
         self.assertEqual(params['client_id'], ['54825715'])
         response = await self.callback.post('/oauth/vk/callback', json={

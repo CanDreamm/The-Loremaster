@@ -410,11 +410,13 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.client.sent), count)
         self.assertIsNone(self.store.dialog(99))
         params = parse_qs(urlsplit(url).query)
-        self.assertEqual(urlsplit(url).hostname, 'id.vk.com')
-        self.assertEqual(params['client_id'], ['54825715'])
-        self.assertEqual(params['response_type'], ['code'])
-        self.assertEqual(set(params['scope'][0].split()), {'wall', 'photos', 'groups'})
-        self.assertTrue(params['code_challenge'][0])
+        self.assertEqual(urlsplit(url).hostname, 'bot.example.com')
+        self.assertEqual(urlsplit(url).path, '/oauth/vk/start')
+        self.assertEqual(set(params), {'state'})
+        self.assertLess(len(url), 255)
+        link_button = next(item for row in self.client.sent[-1]['keyboard']['buttons']
+                           for item in row if item['action']['type'] == 'open_link')
+        self.assertNotIn('color', link_button)
         self.assertEqual(self.app.oauth.import_session(params['state'][0], 'pending')['actor'], 99)
         self.assertEqual(self.store.projects(99), [])
 

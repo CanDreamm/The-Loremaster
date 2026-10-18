@@ -25,6 +25,8 @@ def keyboard(*rows):
         styled_row = []
         for item in row:
             item = {**item, 'action': dict(item['action'])}
+            if item['action']['type'] == 'open_link':
+                item.pop('color', None)
             label = item['action'].get('label', '')
             if label.startswith('Назад'):
                 icon, color = '⬅️', 'primary'
@@ -39,7 +41,8 @@ def keyboard(*rows):
                 styled_row.append(item)
                 continue
             item['action']['label'] = f'{icon} {label}'[:40]
-            item['color'] = color
+            if item['action']['type'] != 'open_link':
+                item['color'] = color
             styled_row.append(item)
         styled_rows.append(styled_row)
     return {'inline': True, 'buttons': styled_rows}
@@ -76,7 +79,7 @@ class BotMenus:
         footer = [button('Главное меню', 'home')]
         if self.oauth and self.oauth.settings.oauth_enabled:
             footer.insert(0, {'action': {'type': 'open_link', 'label': 'Добавить сообщество',
-                                         'link': self.oauth.begin_import(actor)}, 'color': 'positive'})
+                                         'link': self.oauth.begin_import(actor, short=True)}})
         else:
             footer.insert(0, button('Добавить сообщество', 'add'))
         rows.append(footer)

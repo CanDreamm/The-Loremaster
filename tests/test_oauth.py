@@ -42,6 +42,31 @@ class OAuthTests(unittest.IsolatedAsyncioTestCase):
     async def complete(self, state=None):
         return await self.manager.complete(state or self.state(), 'one-use-test-code', 'device-test')
 
+    async def test_short_authorization_link_redirects_with_pkce_and_rejects_expiry(self):
+        url = self.manager.begin_import(42, short=True)
+        parts = urlsplit(url)
+        state = parse_qs(parts.query)['state'][0]
+        row = self.manager.import_session(state, 'pending')
+        verifier = self.manager.vault.decrypt(row['verifier'])
+        async with TestClient(TestServer(create_web_app(self.manager))) as client:
+            response = await client.get(parts.path + '?' + parts.query, allow_redirects=False)
+            self.assertEqual(response.status, 302)
+            redirect = urlsplit(response.headers['Location'])
+            self.assertEqual(redirect.hostname, 'id.vk.com')
+            params = parse_qs(redirect.query)
+            self.assertEqual(params['client_id'], ['12345'])
+            self.assertEqual(params['state'], [state])
+            self.assertEqual(set(params['scope'][0].split()), {'wall', 'photos', 'groups'})
+            challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b'=').decode()
+            self.assertEqual(params['code_challenge'], [challenge])
+            self.assertNotIn(verifier, response.headers['Location'])
+            self.clock[0] += 601
+            expired = await client.get(parts.path + '?' + parts.query, allow_redirects=False)
+            self.assertEqual(expired.status, 400)
+            self.assertNotIn('Location', expired.headers)
+            malformed = await client.get('/oauth/vk/start?state=x&state=y', allow_redirects=False)
+            self.assertEqual(malformed.status, 400)
+
     async def test_connection_is_encrypted_and_project_scoped(self):
         await self.complete()
         row = self.store.db.execute('SELECT * FROM vk_connections').fetchone()
@@ -479,7 +504,8 @@ class CommunityImportTests(unittest.IsolatedAsyncioTestCase):
         state = self.import_state()
         notify = AsyncMock()
         app = create_web_app(self.manager, notify)
-        callback = next(r.handler for r in app.router.routes() if r.method == 'GET')
+        callback = next(r.handler for r in app.router.routes()
+                        if r.method == 'GET' and r.resource.canonical == '/oauth/vk/callback')
         response = await callback(make_mocked_request('GET', '/oauth/vk/callback?' +
             'state=' + state + '&code=private-code&device_id=device'))
         self.assertEqual(response.status, 200)

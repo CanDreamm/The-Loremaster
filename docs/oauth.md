@@ -98,6 +98,9 @@ OAUTH_PORT=8081
 `OAUTH_PUBLIC_URL=https://bot.itiscat.ru`. Сам экран настройки Redirect URL
 не подтверждает поддержку адаптера `vkid` или `vk_api` и выдачу wall/photos:
 это проверяется авторизацией приложения.
+Кнопка добавления открывает короткий адрес `/oauth/vk/start?state=…`, который
+перенаправляет на авторизацию VK, сохраняя state и PKCE. nginx должен направлять
+весь префикс `/oauth/vk/` на обработчик бота, включая start, callback и select.
 Чтобы применить подтверждённые ID и домен к существующему `.env.python`, выполните
 из каталога проекта `.venv/bin/python scripts/configure-oauth.py` от пользователя
 установки: root при ручной установке или через `sudo -u publikot`, если этот

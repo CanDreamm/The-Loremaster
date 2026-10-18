@@ -325,7 +325,7 @@ class VkBot(BotMenus):
         if not self.oauth or not self.oauth.settings.oauth_enabled:
             raise Conflict('Авторизация пока не настроена администратором. Нужны приложение ВК и публичный HTTPS-адрес возврата.')
         if project_id is None:
-            url = self.oauth.begin_import(actor)
+            url = self.oauth.begin_import(actor, short=True)
             return await self.client.send(peer, 'Войдите в ВК тем аккаунтом, из которого пишете боту, и разрешите доступ. '
                 'Затем выберите одно или несколько своих сообществ. Названия загрузятся из ВК автоматически. '
                 'Ссылка действует 10 минут.', keyboard=keyboard(
