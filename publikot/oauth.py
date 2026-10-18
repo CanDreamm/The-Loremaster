@@ -1,4 +1,4 @@
-"""Project-scoped VK authorization. No tokens are accepted via bot messages."""
+"""Project-scoped VK connections, encrypted tokens and optional OAuth."""
 import base64
 import hashlib
 import html
@@ -214,6 +214,55 @@ class OAuthManager:
         existing = self.db.execute("SELECT 1 FROM vk_connections WHERE token<>'' LIMIT 1").fetchone()
         existing = existing or self.db.execute("SELECT 1 FROM oauth_imports WHERE token<>'' OR verifier<>'' LIMIT 1").fetchone()
         self.vault = Vault(settings.data_dir / 'oauth.key', may_create=not existing)
+
+    async def add_with_token(self, actor, group, token):
+        if not self.store.is_allowed(actor, self.settings.owner_id):
+            raise Conflict('Доступ к боту отозван.')
+        if not isinstance(token, str) or not 16 <= len(token) <= 4096 or any(c.isspace() for c in token):
+            raise Conflict('Пришлите только ключ доступа VK (access_token), без ссылки и пояснений.')
+        if self.provider is None:
+            async with aiohttp.ClientSession() as session:
+                return await self._add_with_token(actor, group, token, VkOAuthProvider(self.settings, session))
+        return await self._add_with_token(actor, group, token, self.provider)
+
+    async def _add_with_token(self, actor, group, token, provider):
+        profile = await provider.api(token, 'account.getProfileInfo')
+        if not isinstance(profile, dict) or profile.get('id') != actor:
+            raise Conflict('Нужен пользовательский ключ доступа вашего аккаунта VK с правами wall и photos.')
+        permissions = await provider.api(token, 'account.getAppPermissions')
+        if type(permissions) is not int or permissions & 8196 != 8196:
+            raise Conflict('У ключа нет прав wall и photos. Пришлите ключ с правами публикации текста и фото.')
+        result = await provider.api(token, 'groups.getById', group_id=group, fields='admin_level')
+        groups = result.get('groups', []) if isinstance(result, dict) else result
+        if not isinstance(groups, list) or len(groups) != 1 or not isinstance(groups[0], dict):
+            raise ProviderError('Не удалось проверить сообщество. Подключение не сохранено.')
+        selected = groups[0]
+        if selected.get('id') != group or not selected.get('is_admin') or selected.get('admin_level') not in (2, 3):
+            raise Conflict('У владельца ключа нет прав редактора или администратора этого сообщества.')
+        encrypted = self.vault.encrypt(token)
+        with self.store.transaction():
+            if not self.store.is_allowed(actor, self.settings.owner_id):
+                raise Conflict('Доступ к боту отозван.')
+            existing = self.db.execute('SELECT p.id FROM projects p JOIN project_members m ON m.project_id=p.id '
+                'WHERE m.user_id=? AND p.vk_group=? ORDER BY p.id LIMIT 1', (actor, group)).fetchone()
+            if existing:
+                project_id = existing['id']
+            else:
+                base = str(selected.get('name') or f'Сообщество {group}')[:100]
+                name, index = base, 1
+                while self.db.execute('SELECT 1 FROM projects WHERE owner=? AND name=?', (actor, name)).fetchone():
+                    name = f'{base[:75]} · {group} · {index}'
+                    index += 1
+                project_id = self.db.execute('INSERT INTO projects(owner,name,vk_group,text_prompt) VALUES (?,?,?,?)',
+                    (actor, name, group, SHORT_PROMPT)).lastrowid
+                self.db.execute("INSERT INTO project_members VALUES (?,?,'member')", (project_id, actor))
+            self.db.execute("INSERT INTO vk_connections(project_id,group_id,actor,token,expires_at,status) "
+                "VALUES (?,?,?,?,0,'active') ON CONFLICT(project_id) DO UPDATE SET group_id=excluded.group_id,"
+                "actor=excluded.actor,token=excluded.token,expires_at=0,status='active'",
+                (project_id, group, actor, encrypted))
+            self.db.execute('INSERT INTO sessions(owner,project_id) VALUES (?,?) ON CONFLICT(owner) '
+                'DO UPDATE SET project_id=excluded.project_id,job_id=NULL', (actor, project_id))
+        return project_id
 
     def guard(self, actor, project_id, group=None):
         if not self.store.is_allowed(actor, self.settings.owner_id):

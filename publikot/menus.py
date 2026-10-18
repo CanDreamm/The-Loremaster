@@ -74,6 +74,8 @@ class BotMenus:
         project_id, kind = state.get('project'), state['kind']
         if kind == 'admin':
             previous = button('Назад', 'admin')
+        elif kind in ('add_group', 'add_key'):
+            previous = button('Назад', 'communities' if kind == 'add_group' else 'add')
         elif kind in ('style', 'character'):
             previous = button('Назад', 'style' if kind == 'style' else 'characters', project=project_id)
         elif kind == 'field':
@@ -92,7 +94,7 @@ class BotMenus:
         if screen == 'home':
             return await self.home(actor, peer)
         if screen == 'help':
-            return await self.client.send(peer, '1. Добавьте сообщество и подключите его через ВК.\n'
+            return await self.client.send(peer, '1. Добавьте сообщество: пришлите ссылку, затем ключ доступа VK.\n'
                 '2. Выберите его в «Мои сообщества».\n3. Нажмите «Написать текст» и отправьте задание.\n'
                 '4. Готовый текст можно исправить по замечанию. Публикация требует отдельного подтверждения.\n'
                 'Назад отменяет ввод. Команда /menu всегда открывает главное меню.\n'
@@ -100,7 +102,7 @@ class BotMenus:
         if screen == 'communities':
             return await self.communities(actor, peer, int(payload.get('page', 0)))
         if screen == 'add':
-            return await self.connect(actor, peer, None)
+            return await self.prompt(actor, peer, {'kind': 'add_group'}, 'Пришлите ссылку на сообщество VK.')
         if screen == 'admin':
             if actor != self.settings.owner_id:
                 raise Conflict('Это меню доступно только администратору.')
@@ -270,9 +272,19 @@ class BotMenus:
         if not state:
             return False
         kind = state['kind']
-        if kind in ('add_name', 'add_group'):
+        if kind == 'add_group':
+            group = await self.group_id(text)
+            await self.prompt(actor, peer, {'kind': 'add_key', 'group': group},
+                'Пришлите ключ доступа VK для публикаций — пользовательский access_token с правами wall и photos.')
+            return True
+        if kind == 'add_key':
+            if self.oauth is None:
+                from .oauth import OAuthManager
+                self.oauth = OAuthManager(self.settings, self.store, None)
+            await self.oauth.add_with_token(actor, state['group'], text)
             self.store.set_dialog(actor, None)
-            await self.connect(actor, peer, None)
+            await self.client.send(peer, 'Сообщество добавлено.')
+            await self.communities(actor, peer)
             return True
         if kind == 'admin' and actor != self.settings.owner_id:
             raise Conflict('Это действие доступно только администратору.')

@@ -65,12 +65,12 @@ async def run(args):
         saved = store.cursor(settings.group_id)
         if saved:
             server['ts'] = saved
-        app = VkBot(settings, store, client)
+        manager = OAuthManager(settings, store, VkOAuthProvider(settings, session))
+        app = VkBot(settings, store, client, oauth=manager)
         runner = None
         delay = 2
         try:
             if settings.oauth_enabled:
-                manager = OAuthManager(settings, store, VkOAuthProvider(settings, session))
                 runner = web.AppRunner(create_web_app(manager, notify=client.send), access_log=None)
                 await runner.setup()
                 try:
