@@ -322,7 +322,7 @@ class VkBot(BotMenus):
         await self.preview(actor, peer, ident)
 
     async def connect(self, actor, peer, project_id):
-        if not self.oauth:
+        if not self.oauth or not self.oauth.settings.oauth_enabled:
             raise Conflict('Авторизация пока не настроена администратором. Нужны приложение ВК и публичный HTTPS-адрес возврата.')
         if project_id is None:
             url = self.oauth.begin_import(actor)

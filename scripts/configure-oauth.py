@@ -14,7 +14,7 @@ def configure(target, provider=None):
         raise SystemExit('Сначала настройте бота через scripts/setup-python.py: .env.python отсутствует.')
     os.chmod(target, 0o600)
     # Keep the selected provider, client secret, bot token and other settings.
-    set_key(target, 'VK_OAUTH_CLIENT_ID', '54825414')
+    set_key(target, 'VK_OAUTH_CLIENT_ID', '54825715')
     set_key(target, 'OAUTH_PUBLIC_URL', 'https://bot.itiscat.ru')
     if provider is not None:
         set_key(target, 'VK_OAUTH_PROVIDER', provider)
@@ -25,4 +25,4 @@ if __name__ == '__main__':
     parser.add_argument('--provider', choices=('vkid', 'vk_api', 'vk_implicit'))
     args = parser.parse_args()
     configure(Path(__file__).resolve().parent.parent / '.env.python', args.provider)
-    print('OAuth: приложение 54825414, callback https://bot.itiscat.ru/oauth/vk/callback. Настройки сохранены.')
+    print('OAuth: приложение 54825715, callback https://bot.itiscat.ru/oauth/vk/callback. Настройки сохранены.')

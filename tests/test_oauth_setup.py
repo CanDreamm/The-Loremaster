@@ -21,7 +21,7 @@ class OAuthSetupTests(unittest.TestCase):
             self.configure(target)
             self.assertEqual(dotenv_values(target), {
                 'VK_BOT_TOKEN': 'test-bot', 'VK_OAUTH_CLIENT_SECRET': 'test-secret',
-                'VK_OAUTH_PROVIDER': 'vk_api', 'VK_OAUTH_CLIENT_ID': '54825414',
+                'VK_OAUTH_PROVIDER': 'vk_api', 'VK_OAUTH_CLIENT_ID': '54825715',
                 'OAUTH_PUBLIC_URL': 'https://bot.itiscat.ru', 'OWNER_VK_ID': '42',
             })
             self.assertEqual(target.stat().st_mode & 0o777, 0o600)

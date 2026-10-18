@@ -1,8 +1,10 @@
-"""Exercise bot -> community link -> token validation -> wall.post over local HTTP."""
+"""Exercise bot -> direct authorization link -> callback -> selection -> wall.post over local HTTP."""
 import json
+import re
 import tempfile
 import unittest
 from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
 from unittest.mock import AsyncMock
 
 import aiohttp
@@ -46,7 +48,7 @@ class PublishingFlowTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.settings = Settings('messages-test-key', 242305804, 42, Path(self.temp.name), demo=False,
-                                 oauth_client_id='54825414', oauth_public_url='https://bot.example.com',
+                                 oauth_client_id='54825715', oauth_public_url='https://bot.example.com',
                                  oauth_provider='vk_implicit')
         self.store = Store(self.settings.database)
         self.api_calls = []
@@ -102,17 +104,29 @@ class PublishingFlowTests(unittest.IsolatedAsyncioTestCase):
             for row in (message['keyboard'] or {}).get('buttons', []):
                 for item in row:
                     if item['action']['label'].lstrip('✅❌⬅️☰➕ ') == label:
+                        if item['action']['type'] == 'open_link':
+                            return item['action']['link']
                         return await self.send(payload=json.loads(item['action']['payload']))
         self.fail('Missing button: ' + label)
 
     async def connect_and_compose(self):
         await self.send('/start')
         await self.click('Мои сообщества')
-        await self.click('Добавить сообщество')
-        await self.send('https://vk.ru/club123')
-        await self.send('publishing-flow-test-key')
-        self.assertEqual([method for method, _ in self.api_calls],
-                         ['account.getProfileInfo', 'account.getAppPermissions', 'groups.getById'])
+        url = await self.click('Добавить сообщество')
+        params = parse_qs(urlsplit(url).query)
+        self.assertEqual(params['client_id'], ['54825715'])
+        response = await self.callback.post('/oauth/vk/callback', json={
+            'state': params['state'][0], 'access_token': 'publishing-flow-test-key', 'expires_in': '3600',
+        }, headers={'Origin': self.settings.oauth_public_url})
+        self.assertEqual(response.status, 200, await response.text())
+        selection_url = (await response.json())['selection_url']
+        cookie = {'Cookie': 'vk_import=' + response.cookies['vk_import'].value}
+        picker = await self.callback.get(selection_url, headers=cookie)
+        self.assertEqual(picker.status, 200)
+        csrf = re.search(r'name="csrf" value="([^"]+)"', await picker.text()).group(1)
+        response = await self.callback.post('/oauth/vk/select', data={
+            'state': params['state'][0], 'csrf': csrf, 'group': '123'}, headers=cookie)
+        self.assertEqual(response.status, 200, await response.text())
         await self.click('Мои сообщества')
         await self.click(f"Кофейня · №{self.store.project(42)['id']}")
         await self.click('Написать текст')

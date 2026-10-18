@@ -68,6 +68,8 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
             for row in (message.get('keyboard') or {}).get('buttons', []):
                 for item in row:
                     if item['action'].get('label', '').lstrip('✅❌⬅️☰➕ ') == label:
+                        if item['action']['type'] == 'open_link':
+                            return item['action']['link']
                         return await self.send(user=user, payload=json.loads(item['action']['payload']))
         self.fail(f'Button not found: {label}')
 
@@ -341,11 +343,11 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
         await self.send('/start')
         self.enable_oauth()
         await self.click('Мои сообщества')
-        await self.click('Добавить сообщество')
-        self.app.oauth.provider.api = AsyncMock(side_effect=[
-            {'id': 42}, 8196, {'groups': [{'id': 123, 'name': 'Моя кофейня', 'is_admin': 1, 'admin_level': 3}]}])
-        await self.send('https://vk.ru/club123')
-        await self.send('private-test-token')
+        url = await self.click('Добавить сообщество')
+        from urllib.parse import parse_qs, urlsplit
+        state = parse_qs(urlsplit(url).query)['state'][0]
+        row = await self.app.oauth.prepare_import(state, 'code', 'device')
+        await self.app.oauth.finish_import(state, row['csrf'], [123])
         project = self.store.project(42)
         await self.send(payload={'action': 'menu', 'screen': 'workspace', 'project': project['id']})
         self.assertEqual(project['vk_group'], 123)
@@ -370,7 +372,7 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
         self.publish.assert_not_awaited()
 
     def enable_oauth(self):
-        settings = replace(self.settings, oauth_client_id='123', oauth_public_url='https://bot.example.com')
+        settings = replace(self.settings, oauth_client_id='54825715', oauth_public_url='https://bot.example.com')
         provider = VkOAuthProvider(settings, None)
         provider.exchange = AsyncMock(return_value={'access_token': 'private-test-token'})
         provider.communities = AsyncMock(return_value=[{'id': 123, 'name': 'Моя кофейня'}])
@@ -378,44 +380,42 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
         provider.validate_selected = AsyncMock()
         self.app.oauth = OAuthManager(settings, self.store, provider)
 
-    async def test_add_requests_link_without_oauth_or_empty_project(self):
+    async def test_add_requires_oauth_without_creating_empty_project(self):
         await self.send('/start')
         await self.click('Мои сообщества')
         await self.click('Добавить сообщество')
-        self.assertIn('Пришлите ссылку', self.client.sent[-1]['text'])
+        self.assertIn('Авторизация пока не настроена', self.client.sent[-1]['text'])
         self.assertEqual(self.store.projects(42), [])
-        self.assertEqual(self.store.dialog(42), {'kind': 'add_group'})
-
-    async def test_manual_add_cancel_invalid_link_and_retry_invalid_key(self):
-        self.enable_oauth()
-        self.app.oauth.provider.api = AsyncMock(side_effect=[
-            {'id': 42}, 4,
-            {'id': 42}, 8196, {'groups': [{'id': 123, 'name': 'Моя кофейня', 'is_admin': 1, 'admin_level': 3}]}])
-        await self.send('/menu')
-        await self.click('Мои сообщества')
-        await self.click('Добавить сообщество')
-        await self.send('https://example.com/club123')
-        self.assertEqual(self.store.dialog(42)['kind'], 'add_group')
-        await self.send('https://vk.ru/club123')
-        self.assertEqual(self.store.dialog(42), {'kind': 'add_key', 'group': 123})
-        await self.click('Назад')
-        self.assertEqual(self.store.dialog(42)['kind'], 'add_group')
-        await self.send('https://vk.ru/club123')
-        await self.send('key-without-permissions')
-        self.assertEqual(self.store.projects(42), [])
-        self.assertEqual(self.store.dialog(42)['kind'], 'add_key')
-        await self.send('correct-private-key')
         self.assertIsNone(self.store.dialog(42))
-        self.assertEqual(len(self.store.projects(42)), 1)
-        self.assertNotIn('correct-private-key', str(self.client.sent))
 
-    async def test_allowed_member_can_open_own_community_picker(self):
+    async def test_legacy_add_dialog_redirects_to_authorization_without_saving_key(self):
+        self.enable_oauth()
+        self.app.oauth.provider.api = AsyncMock()
+        self.store.set_dialog(42, {'kind': 'add_key', 'group': 123})
+        await self.send('legacy-private-key')
+        self.assertIsNone(self.store.dialog(42))
+        self.assertEqual(self.store.projects(42), [])
+        self.app.oauth.provider.api.assert_not_awaited()
+        self.assertNotIn('legacy-private-key', str(self.client.sent))
+        self.assertEqual(self.client.sent[-1]['keyboard']['buttons'][0][0]['action']['type'], 'open_link')
+
+    async def test_allowed_member_opens_authorization_directly_from_add_button(self):
+        from urllib.parse import parse_qs, urlsplit
         self.enable_oauth()
         await self.send('/allow 99')
         await self.send('/start', user=99)
         await self.click('Мои сообщества', user=99)
-        await self.click('Добавить сообщество', user=99)
-        self.assertEqual(self.store.dialog(99), {'kind': 'add_group'})
+        count = len(self.client.sent)
+        url = await self.click('Добавить сообщество', user=99)
+        self.assertEqual(len(self.client.sent), count)
+        self.assertIsNone(self.store.dialog(99))
+        params = parse_qs(urlsplit(url).query)
+        self.assertEqual(urlsplit(url).hostname, 'id.vk.com')
+        self.assertEqual(params['client_id'], ['54825715'])
+        self.assertEqual(params['response_type'], ['code'])
+        self.assertEqual(set(params['scope'][0].split()), {'wall', 'photos', 'groups'})
+        self.assertTrue(params['code_challenge'][0])
+        self.assertEqual(self.app.oauth.import_session(params['state'][0], 'pending')['actor'], 99)
         self.assertEqual(self.store.projects(99), [])
 
     async def test_change_group_resolves_short_name_and_rejects_profile(self):

@@ -74,7 +74,11 @@ class BotMenus:
         if nav:
             rows.append(nav)
         footer = [button('Главное меню', 'home')]
-        footer.insert(0, button('Добавить сообщество', 'add'))
+        if self.oauth and self.oauth.settings.oauth_enabled:
+            footer.insert(0, {'action': {'type': 'open_link', 'label': 'Добавить сообщество',
+                                         'link': self.oauth.begin_import(actor)}, 'color': 'positive'})
+        else:
+            footer.insert(0, button('Добавить сообщество', 'add'))
         rows.append(footer)
         await self.client.send(peer, (f'Мои сообщества · {page + 1}/{pages}. Выберите сообщество.' if projects
                                     else 'Сообществ пока нет. Нажмите «Добавить сообщество» или попросите администратора назначить проект.'),
@@ -117,7 +121,7 @@ class BotMenus:
         if screen == 'home':
             return await self.home(actor, peer)
         if screen == 'help':
-            return await self.client.send(peer, '1. Добавьте сообщество: пришлите ссылку, затем ключ доступа VK.\n'
+            return await self.client.send(peer, '1. Нажмите «Добавить сообщество», разрешите доступ в VK и выберите сообщества.\n'
                 '2. Выберите его в «Мои сообщества».\n3. Нажмите «Написать текст» и отправьте задание.\n'
                 '4. Готовый текст можно исправить по замечанию. Публикация требует отдельного подтверждения.\n'
                 'Назад отменяет ввод. Команда /menu всегда открывает главное меню.\n'
@@ -125,7 +129,7 @@ class BotMenus:
         if screen == 'communities':
             return await self.communities(actor, peer, int(payload.get('page', 0)))
         if screen == 'add':
-            return await self.prompt(actor, peer, {'kind': 'add_group'}, 'Пришлите ссылку на сообщество VK.')
+            return await self.connect(actor, peer, None)
         if screen == 'admin':
             if actor != self.settings.owner_id:
                 raise Conflict('Это меню доступно только администратору.')
@@ -317,19 +321,9 @@ class BotMenus:
         if not state:
             return False
         kind = state['kind']
-        if kind == 'add_group':
-            group = await self.group_id(text)
-            await self.prompt(actor, peer, {'kind': 'add_key', 'group': group},
-                'Пришлите ключ доступа VK для публикаций — пользовательский access_token с правами wall и photos.')
-            return True
-        if kind == 'add_key':
-            if self.oauth is None:
-                from .oauth import OAuthManager
-                self.oauth = OAuthManager(self.settings, self.store, None)
-            await self.oauth.add_with_token(actor, state['group'], text)
+        if kind in ('add_name', 'add_group', 'add_key'):
             self.store.set_dialog(actor, None)
-            await self.client.send(peer, 'Сообщество добавлено.')
-            await self.communities(actor, peer)
+            await self.connect(actor, peer, None)
             return True
         if kind == 'admin' and actor != self.settings.owner_id:
             raise Conflict('Это действие доступно только администратору.')

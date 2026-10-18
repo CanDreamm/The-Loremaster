@@ -92,9 +92,9 @@ OAUTH_PORT=8081
 ```
 
 Для vk_api дополнительно VK_OAUTH_CLIENT_SECRET. Секреты вводятся только на сервере.
-Для текущего приложения 54825414 в настройках ВК указаны базовый домен
+Для текущего приложения 54825715 настройте домен сервиса
 `bot.itiscat.ru` и Redirect URL `https://bot.itiscat.ru/oauth/vk/callback`.
-Соответствующие значения на сервере: `VK_OAUTH_CLIENT_ID=54825414` и
+Соответствующие значения на сервере: `VK_OAUTH_CLIENT_ID=54825715` и
 `OAUTH_PUBLIC_URL=https://bot.itiscat.ru`. Сам экран настройки Redirect URL
 не подтверждает поддержку адаптера `vkid` или `vk_api` и выдачу wall/photos:
 это проверяется авторизацией приложения.
