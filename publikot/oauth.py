@@ -102,6 +102,11 @@ class VkOAuthProvider:
                     error = result['error']
                     code = error.get('error_code') if isinstance(error, dict) else None
                     code = code if type(code) is int else 'неизвестен'
+                    if code == 27 and method in ('account.getProfileInfo', 'account.getAppPermissions'):
+                        raise ProviderError('Передан ключ сообщества. Для публикации текста и фото нужен '
+                            'пользовательский access_token вашего аккаунта с правами wall и photos. '
+                            f'Ключ из раздела «Работа с API» сообщества не подходит. '
+                            f'Подключение не сохранено (VK API {safe_method}, код 27).')
                     raise ProviderError(f'Проверка подключения ВК: {safe_method}, код API {code}. '
                                         'ВК отклонил проверку пользовательского ключа. Подключение не сохранено.')
                 if 'response' not in result:
