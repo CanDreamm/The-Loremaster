@@ -38,6 +38,7 @@ class Store:
           path TEXT NOT NULL, description TEXT NOT NULL DEFAULT ''
         );
         CREATE TABLE IF NOT EXISTS schema_meta (name TEXT PRIMARY KEY);
+        CREATE TABLE IF NOT EXISTS id_counters (entity TEXT PRIMARY KEY, value INTEGER NOT NULL);
         CREATE TABLE IF NOT EXISTS inbox (
           event_id TEXT PRIMARY KEY,
           status TEXT NOT NULL CHECK(status IN ('processing','done','failed'))
@@ -102,6 +103,10 @@ class Store:
         if 'reference_path' not in {r['name'] for r in self.db.execute('PRAGMA table_info(jobs)')}:
             self.db.execute('ALTER TABLE jobs ADD COLUMN reference_path TEXT')
         with self.transaction():
+            for entity in ('projects', 'jobs'):
+                maximum = self.db.execute(f'SELECT COALESCE(MAX(id),0) FROM {entity}').fetchone()[0]
+                self.db.execute('INSERT INTO id_counters VALUES (?,?) ON CONFLICT(entity) '
+                                'DO UPDATE SET value=MAX(value,excluded.value)', (entity, maximum))
             if not self.db.execute("SELECT 1 FROM schema_meta WHERE name='single_project_materials'").fetchone():
                 self.db.execute("INSERT OR IGNORE INTO project_materials(project_id,kind,path,description) "
                     "SELECT c.project_id,'character',i.path,c.name || char(10) || c.description "
@@ -165,10 +170,51 @@ class Store:
 
     def create_project(self, owner, name):
         with self.transaction():
-            ident = self.db.execute('INSERT INTO projects(owner,name) VALUES (?,?)', (owner, name)).lastrowid
+            ident = self.next_id('projects')
+            self.db.execute('INSERT INTO projects(id,owner,name) VALUES (?,?,?)', (ident, owner, name))
             self.db.execute("INSERT INTO project_members VALUES (?,?,'member')", (ident, owner))
             self.db.execute('INSERT INTO sessions(owner,project_id) VALUES (?,?) ON CONFLICT(owner) DO UPDATE SET project_id=excluded.project_id,job_id=NULL', (owner, ident))
         return ident
+
+    def next_id(self, entity):
+        # Call inside the insert transaction: old buttons must never target new records.
+        if entity not in ('projects', 'jobs') or not self.db.in_transaction:
+            raise ValueError('Invalid ID allocation')
+        maximum = self.db.execute(f'SELECT COALESCE(MAX(id),0) FROM {entity}').fetchone()[0]
+        self.db.execute('UPDATE id_counters SET value=MAX(value,?)+1 WHERE entity=?', (maximum, entity))
+        return self.db.execute('SELECT value FROM id_counters WHERE entity=?', (entity,)).fetchone()[0]
+
+    def deletable_project(self, actor, project_id, admin):
+        if not self.is_allowed(actor, admin):
+            raise Conflict('Доступ к боту отозван.')
+        project = self.db.execute('SELECT * FROM projects WHERE id=?', (project_id,)).fetchone()
+        if not project or actor not in (project['owner'], admin):
+            raise Conflict('Удалить проект может только его владелец или администратор бота.')
+        return project
+
+    def delete_project(self, actor, project_id, admin):
+        with self.transaction():
+            self.deletable_project(actor, project_id, admin)
+            if self.db.execute("SELECT 1 FROM jobs WHERE project_id=? AND status IN ('generating','publishing')",
+                               (project_id,)).fetchone():
+                raise Conflict('Дождитесь завершения генерации или публикации, затем удалите проект.')
+            self.db.execute('UPDATE sessions SET project_id=NULL,job_id=NULL WHERE project_id=? '
+                            'OR job_id IN (SELECT id FROM jobs WHERE project_id=?)', (project_id, project_id))
+            for dialog in self.db.execute('SELECT actor,state FROM ui_dialogs').fetchall():
+                if json.loads(dialog['state']).get('project') == project_id:
+                    self.set_dialog(dialog['actor'], None)
+            tables = {r['name'] for r in self.db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            for table in ('oauth_states', 'vk_connections'):
+                if table in tables:
+                    self.db.execute(f'DELETE FROM {table} WHERE project_id=?', (project_id,))
+            self.db.execute('DELETE FROM approvals WHERE job_id IN (SELECT id FROM jobs WHERE project_id=?)', (project_id,))
+            self.db.execute('DELETE FROM versions WHERE job_id IN (SELECT id FROM jobs WHERE project_id=?)', (project_id,))
+            self.db.execute('DELETE FROM jobs WHERE project_id=?', (project_id,))
+            self.db.execute('DELETE FROM character_images WHERE character_id IN '
+                            '(SELECT id FROM characters WHERE project_id=?)', (project_id,))
+            for table in ('characters', 'project_references', 'project_materials', 'project_members'):
+                self.db.execute(f'DELETE FROM {table} WHERE project_id=?', (project_id,))
+            self.db.execute('DELETE FROM projects WHERE id=?', (project_id,))
 
     def is_allowed(self, user, admin):
         return user == admin or self.db.execute('SELECT 1 FROM allowed_users WHERE telegram_id=?', (user,)).fetchone() is not None
@@ -293,7 +339,8 @@ class Store:
         project = self.require(owner, project_id) if project_id is not None else self.project(owner)
         self.require(owner, project['id'])
         with self.transaction():
-            ident = self.db.execute("INSERT INTO jobs(owner,project_id,brief,image_path,status,target_group) VALUES (?,?,?,?,'generating',?)", (owner, project['id'], brief, image_path, project['vk_group'])).lastrowid
+            ident = self.next_id('jobs')
+            self.db.execute("INSERT INTO jobs(id,owner,project_id,brief,image_path,status,target_group) VALUES (?,?,?,?,?,'generating',?)", (ident, owner, project['id'], brief, image_path, project['vk_group']))
             self.db.execute('UPDATE jobs SET reference_path=? WHERE id=?', (reference_path, ident))
             self.db.execute('UPDATE sessions SET job_id=? WHERE owner=? AND project_id=?', (ident, owner, project['id']))
         return ident, dict(project)

@@ -23,6 +23,63 @@ class StoreTests(unittest.TestCase):
         self.store.save_version(42, ident, 1, 'Текст', demo)
         return ident
 
+    def test_delete_project_cleans_dependencies_and_preserves_other_projects(self):
+        from publikot.oauth import OAuthManager
+        from publikot.settings import Settings
+        settings = Settings('test-key', 123, 42, Path(self.tmp.name))
+        manager = OAuthManager(settings, self.store, None)
+        self.store.set_access(42, 99, True, 42)
+        self.store.set_member(42, self.project, 99, True, 42)
+        self.store.select(99, self.project)
+        self.store.set_dialog(99, {'kind': 'field', 'project': self.project, 'field': 'concept'})
+        self.store.set_material(42, self.project, 'style', '/style.jpg')
+        self.store.reference(42, '/old-reference.jpg', 'Архив')
+        character = self.store.db.execute('INSERT INTO characters(project_id,name) VALUES (?,?)',
+                                          (self.project, 'Архив')).lastrowid
+        self.store.db.execute('INSERT INTO character_images(character_id,path) VALUES (?,?)', (character, '/old.jpg'))
+        ident = self.draft()
+        self.store.claim(42, ident, 1)
+        self.store.finish(42, ident, 'published', 'https://vk.ru/wall-123_1')
+        self.store.db.execute("INSERT INTO vk_connections VALUES (?,?,?,?,0,'active')",
+                              (self.project, 123, 42, manager.vault.encrypt('private-token')))
+        self.store.db.execute("INSERT INTO oauth_states(state_hash,actor,project_id,group_id,expires_at,verifier) VALUES ('state',42,?,123,1,'encrypted')", (self.project,))
+        other = self.store.create_project(42, 'Другой')
+        other_job = self.draft()
+        with self.assertRaises(Conflict):
+            self.store.delete_project(99, self.project, 42)
+        self.store.delete_project(42, self.project, 42)
+        self.assertEqual([p['id'] for p in self.store.projects(42)], [other])
+        self.assertEqual(self.store.job(42, other_job)['project_id'], other)
+        self.assertIsNone(self.store.dialog(99))
+        self.assertIsNone(self.store.db.execute('SELECT project_id FROM sessions WHERE owner=99').fetchone()[0])
+        for table in ('approvals', 'characters', 'character_images', 'project_references',
+                      'project_materials', 'oauth_states', 'vk_connections'):
+            self.assertEqual(self.store.db.execute(f'SELECT count(*) FROM {table}').fetchone()[0], 0)
+        self.assertEqual(self.store.db.execute('PRAGMA foreign_key_check').fetchall(), [])
+
+    def test_active_jobs_block_deletion_and_ids_are_not_reused_after_restart(self):
+        ident, _ = self.store.create_job(42, 'Задание')
+        with self.assertRaises(Conflict):
+            self.store.delete_project(42, self.project, 42)
+        self.store.save_version(42, ident, 1, 'Текст', False)
+        self.store.claim(42, ident, 1)
+        with self.assertRaises(Conflict):
+            self.store.delete_project(42, self.project, 42)
+        self.store.finish(42, ident, 'published')
+        self.store.delete_project(42, self.project, 42)
+        self.store.db.close()
+        self.store = Store(self.path)
+        new = self.store.create_project(42, 'Новый')
+        new_job, _ = self.store.create_job(42, 'Задание')
+        self.assertGreater(new, self.project)
+        self.assertGreater(new_job, ident)
+
+    def test_admin_can_delete_project_created_by_another_user(self):
+        self.store.set_access(42, 99, True, 42)
+        project = self.store.create_project(99, 'Проект участника')
+        self.store.delete_project(42, project, 42)
+        self.assertEqual(self.store.projects(99), [])
+
     def test_project_data_survives_restart(self):
         self.store.db.close()
         self.store = Store(self.path)

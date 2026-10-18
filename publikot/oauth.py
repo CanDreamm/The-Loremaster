@@ -253,8 +253,9 @@ class OAuthManager:
                 while self.db.execute('SELECT 1 FROM projects WHERE owner=? AND name=?', (actor, name)).fetchone():
                     name = f'{base[:75]} · {group} · {index}'
                     index += 1
-                project_id = self.db.execute('INSERT INTO projects(owner,name,vk_group,text_prompt) VALUES (?,?,?,?)',
-                    (actor, name, group, SHORT_PROMPT)).lastrowid
+                project_id = self.store.next_id('projects')
+                self.db.execute('INSERT INTO projects(id,owner,name,vk_group,text_prompt) VALUES (?,?,?,?,?)',
+                    (project_id, actor, name, group, SHORT_PROMPT))
                 self.db.execute("INSERT INTO project_members VALUES (?,?,'member')", (project_id, actor))
             self.db.execute("INSERT INTO vk_connections(project_id,group_id,actor,token,expires_at,status) "
                 "VALUES (?,?,?,?,0,'active') ON CONFLICT(project_id) DO UPDATE SET group_id=excluded.group_id,"
@@ -394,7 +395,8 @@ class OAuthManager:
                         name = groups[group]['name'][:100] or str(group)
                         if self.db.execute('SELECT 1 FROM projects WHERE owner=? AND name=?', (row['actor'], name)).fetchone():
                             name = f'{name} · {group}'
-                        project_id = self.db.execute('INSERT INTO projects(owner,name,vk_group,text_prompt) VALUES (?,?,?,?)', (row['actor'], name, group, SHORT_PROMPT)).lastrowid
+                        project_id = self.store.next_id('projects')
+                        self.db.execute('INSERT INTO projects(id,owner,name,vk_group,text_prompt) VALUES (?,?,?,?,?)', (project_id, row['actor'], name, group, SHORT_PROMPT))
                         self.db.execute("INSERT INTO project_members VALUES (?,?,'member')", (project_id, row['actor']))
                     self.db.execute("INSERT INTO vk_connections(project_id,group_id,actor,token,expires_at,status) VALUES (?,?,?,?,?,'active') ON CONFLICT(project_id) DO UPDATE SET group_id=excluded.group_id,actor=excluded.actor,token=excluded.token,expires_at=excluded.expires_at,status='active'", (project_id, group, row['actor'], row['token'], row['token_expiry']))
                     projects.append(project_id)

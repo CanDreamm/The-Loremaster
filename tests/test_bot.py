@@ -87,11 +87,45 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.labels(), ['Написать текст', 'Мои задания', 'Настройки проекта', 'Назад', 'Главное меню'])
         await self.click('Настройки проекта')
         self.assertEqual(self.labels(), ['Концепция', 'Тон общения', 'Правила для текста', 'Визуальный стиль',
-                                         'Персонажи', 'Промпт для текста', 'Промпт для изображения', 'Назад'])
+                                         'Персонажи', 'Промпт для текста', 'Промпт для изображения',
+                                         'Удалить проект', 'Назад'])
         await self.click('Назад')
         self.assertIn('Настройки проекта', self.labels())
         await self.click('Назад')
         self.assertIn('Добавить сообщество', self.labels())
+
+    async def test_project_deletion_requires_fresh_confirmation_and_returns_to_list(self):
+        project = await self.setup_project()
+        await self.send('/post Черновик')
+        job = self.store.job(42)
+        await self.send('/settings')
+        await self.click('Удалить проект')
+        self.assertEqual(len(self.store.projects(42)), 1)
+        self.assertIn('для всех участников', self.client.sent[-1]['text'])
+        await self.click('Назад')
+        await self.send(payload={'action': 'menu', 'screen': 'delete_project', 'project': project})
+        self.assertEqual(len(self.store.projects(42)), 1)
+        await self.send('/settings')
+        await self.click('Удалить проект')
+        await self.click('Да, удалить')
+        self.assertEqual(self.store.projects(42), [])
+        self.assertIn('Добавить сообщество', self.labels())
+        await self.send('/new Новый проект')
+        self.assertGreater(self.store.project(42)['id'], project)
+        await self.send('/post Новый черновик')
+        self.assertGreater(self.store.job(42)['id'], job['id'])
+        await self.send(payload={'action': 'menu', 'screen': 'delete_project', 'project': project})
+        self.assertEqual(len(self.store.projects(42)), 1)
+
+    async def test_assigned_member_cannot_delete_owner_project(self):
+        project = await self.setup_project()
+        await self.send('/allow 99')
+        await self.send(f'/assign {project} 99')
+        await self.send(user=99, payload={'action': 'menu', 'screen': 'settings', 'project': project})
+        self.assertNotIn('Удалить проект', self.labels())
+        for screen in ('delete_project_confirm', 'delete_project'):
+            await self.send(user=99, payload={'action': 'menu', 'screen': screen, 'project': project})
+        self.assertEqual(len(self.store.projects(42)), 1)
 
     async def test_settings_show_current_value_and_cancel_without_writing(self):
         project = await self.setup_project()

@@ -90,6 +90,7 @@ class BotMenus:
 
     async def menu(self, actor, peer, payload):
         screen = payload['screen']
+        previous_dialog = self.store.dialog(actor)
         self.store.set_dialog(actor, None)
         if screen == 'home':
             return await self.home(actor, peer)
@@ -124,6 +125,20 @@ class BotMenus:
                     else 'Введите номер проекта.' if screen == 'admin_members' else 'Введите числовой ID пользователя ВК.')
             return await self.prompt(actor, peer, {'kind': 'admin', 'command': command}, hint)
         project_id = int(payload['project'])
+        if screen in ('delete_project_confirm', 'delete_project'):
+            project = self.store.deletable_project(actor, project_id, self.settings.owner_id)
+            if screen == 'delete_project_confirm':
+                self.store.set_dialog(actor, {'kind': 'delete_project', 'project': project_id})
+                return await self.client.send(peer,
+                    f"Удалить проект «{project['name']}», его настройки, задания и сохранённый ключ доступа?\n"
+                    'Проект будет удалён для всех участников. Опубликованные посты в VK останутся.',
+                    keyboard=keyboard([button('Да, удалить', 'delete_project', project=project_id)],
+                                      [button('Назад', 'settings', project=project_id)]))
+            if previous_dialog != {'kind': 'delete_project', 'project': project_id}:
+                raise Conflict('Подтверждение устарело. Откройте удаление проекта заново.')
+            self.store.delete_project(actor, project_id, self.settings.owner_id)
+            await self.client.send(peer, 'Проект удалён.')
+            return await self.communities(actor, peer)
         p = self.store.require(actor, project_id)
         self.store.select(actor, project_id)
         if screen == 'workspace':
@@ -142,6 +157,8 @@ class BotMenus:
                     [button('Промпт для текста', 'field', project=project_id, field='text_template'),
                      button('Промпт для изображения', 'field', project=project_id, field='image_template')],
                     back(project_id)]
+            if actor in (p['owner'], self.settings.owner_id):
+                rows.insert(-1, [button('Удалить проект', 'delete_project_confirm', project=project_id)])
             return await self.client.send(peer, f"Настройки проекта: {p['name']}\nВыберите раздел.", keyboard=keyboard(*rows))
         if screen in ('field', 'field_add'):
             field = payload['field']
