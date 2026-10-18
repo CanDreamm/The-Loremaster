@@ -19,15 +19,18 @@ class YandexText:
     def __init__(self, key, folder, demo):
         self.key, self.folder, self.demo = key, folder, demo
 
-    async def generate(self, concept, brief, previous='', feedback=''):
+    async def generate(self, concept, brief, previous='', feedback='', *, prompt=None):
         if self.demo:
             return '[ДЕМО — без обращения к ИИ]\n' + brief + ('\nЗамечание: ' + feedback if feedback else '')
         if not self.key or not self.folder:
             raise ProviderError('Не настроены YANDEX_API_KEY и YANDEX_FOLDER_ID.')
-        system = ('Ты редактор публикаций ВК. По умолчанию пиши короткий пост до 500 символов, '
-                  'если в задании или правилах проекта не указан другой объём. '
-                  'Верни только текст поста без пояснений. Не выдумывай факты. Концепция проекта:\n') + concept
-        user = brief + ('\nПредыдущий вариант:\n' + previous + '\nИсправления:\n' + feedback if previous else '')
+        system = prompt if prompt is not None else (
+            'Ты редактор публикаций ВК. По умолчанию пиши короткий пост до 500 символов, '
+            'если в задании или правилах проекта не указан другой объём. '
+            'Верни только текст поста без пояснений. Не выдумывай факты. Концепция проекта:\n' + concept)
+        user = ('Подготовь готовый текст поста по инструкциям. Верни только текст публикации.'
+                if prompt is not None else brief + ('\nПредыдущий вариант:\n' + previous +
+                    '\nИсправления:\n' + feedback if previous else ''))
         try:
             async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=90)) as session:
                 async with session.post('https://llm.api.cloud.yandex.net/foundationModels/v1/completion',

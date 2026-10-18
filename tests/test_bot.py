@@ -87,7 +87,7 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.labels(), ['Написать текст', 'Мои задания', 'Настройки проекта', 'Назад', 'Главное меню'])
         await self.click('Настройки проекта')
         self.assertEqual(self.labels(), ['Концепция', 'Тон общения', 'Правила для текста', 'Визуальный стиль',
-                                         'Референсы', 'Персонажи', 'Назад'])
+                                         'Персонажи', 'Назад'])
         await self.click('Назад')
         self.assertIn('Настройки проекта', self.labels())
         await self.click('Назад')
@@ -96,7 +96,7 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
     async def test_settings_show_current_value_and_cancel_without_writing(self):
         project = await self.setup_project()
         fields = [('Концепция', 'concept'), ('Тон общения', 'tone'),
-                  ('Правила для текста', 'text_prompt'), ('Визуальный стиль', 'visual_style')]
+                  ('Правила для текста', 'text_prompt')]
         for label, field in fields:
             with self.subTest(field=field):
                 self.store.configure(42, field, 'Сохранённое значение')
@@ -118,7 +118,7 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_image_settings_require_photo_and_show_saved_images(self):
         await self.setup_project()
-        for label, kind in [('Референсы', 'reference'), ('Персонажи', 'character')]:
+        for label, kind in [('Визуальный стиль', 'style'), ('Персонажи', 'character')]:
             with self.subTest(kind=kind):
                 await self.send('/settings')
                 await self.click(label)
@@ -127,11 +127,11 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
                 await self.click('Добавить')
                 await self.send('Без изображения')
                 self.assertEqual(self.store.dialog(42)['kind'], kind)
-                self.assertEqual(self.store.references(42) if kind == 'reference' else self.store.characters(42), [])
+                self.assertEqual(list(filter(None, [self.store.material(42, self.store.project(42)['id'], kind)])), [])
                 previous = len(self.client.photos)
                 await self.send(photo=True)
                 self.assertIsNone(self.store.dialog(42))
-                rows = self.store.references(42) if kind == 'reference' else self.store.character_media(42)
+                rows = [self.store.material(42, self.store.project(42)['id'], kind)]
                 self.assertEqual(len(rows), 1)
                 self.assertEqual(self.client.photos[previous:], [(42, rows[0]['path'])])
                 await self.click('Назад')
@@ -139,26 +139,23 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
                 await self.click(label)
                 self.assertEqual(self.client.photos[-1], (42, rows[0]['path']))
 
-    async def test_character_images_are_project_scoped_and_paginated(self):
+    async def test_character_image_is_single_and_project_scoped(self):
         first = await self.setup_project()
-        for index in range(5):
-            self.store.character(42, 'Кот', 'Рыжий', f'/images/cat-{index}.jpg')
-        self.store.character(42, 'Без фото', 'Старый персонаж')
+        self.store.character(42, 'Кот', 'Рыжий', '/images/cat-1.jpg')
+        self.store.character(42, 'Лис', 'Новый', '/images/fox.jpg')
         await self.send('/settings')
         await self.click('Персонажи')
-        self.assertEqual(len(self.client.photos), 4)
-        await self.click('Далее')
-        self.assertEqual(len(self.client.photos), 5)
-        self.assertTrue(any('Старый персонаж' in message['text'] for message in self.client.sent))
+        self.assertEqual(self.client.photos, [(42, '/images/fox.jpg')])
+        self.assertNotIn('Далее', self.labels())
         second = self.store.create_project(42, 'Другой проект')
         await self.send('/settings')
         await self.click('Персонажи')
-        self.assertEqual(len(self.client.photos), 5)
+        self.assertEqual(len(self.client.photos), 1)
         self.assertIn('Пока ничего не добавлено', self.client.sent[-1]['text'])
         await self.send('/allow 99')
         await self.send(f'/assign {second} 99')
         await self.send(user=99, payload={'action': 'menu', 'screen': 'characters', 'project': first})
-        self.assertEqual(len(self.client.photos), 5)
+        self.assertEqual(len(self.client.photos), 1)
 
     async def test_setting_input_stays_bound_to_original_project(self):
         first = await self.setup_project()
@@ -166,19 +163,89 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
         await self.click('Визуальный стиль')
         await self.click('Добавить')
         second = self.store.create_project(42, 'Второй')
-        await self.send('Пастель')
-        self.assertEqual(self.store.require(42, first)['visual_style'], 'Пастель')
-        self.assertEqual(self.store.require(42, second)['visual_style'], '')
+        await self.send('Пастель', photo=True)
+        self.assertEqual(self.store.material(42, first, 'style')['description'], 'Пастель')
+        self.assertIsNone(self.store.material(42, second, 'style'))
 
     async def test_revoked_access_cannot_change_settings_or_upload_images(self):
         project = await self.setup_project()
         await self.send('/allow 99')
         await self.send(f'/assign {project} 99')
-        await self.send(user=99, payload={'action': 'menu', 'screen': 'reference', 'project': project})
+        await self.send(user=99, payload={'action': 'menu', 'screen': 'style_add', 'project': project})
         await self.send(f'/unassign {project} 99')
         await self.send(user=99, photo=True)
-        self.assertEqual(self.store.references(42), [])
+        self.assertIsNone(self.store.material(42, project, 'style'))
         self.assertEqual(self.client.photos, [])
+
+    async def test_material_replacement_and_multiple_photo_rejection(self):
+        project = await self.setup_project()
+        for screen, kind in [('style', 'style'), ('characters', 'character')]:
+            await self.send(payload={'action': 'menu', 'screen': screen, 'project': project})
+            await self.click('Добавить')
+            await self.send('Первое фото', photo=True)
+            old = self.store.material(42, project, kind)['path']
+            await self.click('Добавить')
+            event = self.event('Две фотографии', photo=True)
+            attachments = event['object']['message']['attachments']
+            attachments.append(attachments[0].copy())
+            await self.app.handle(event)
+            self.assertEqual(self.store.material(42, project, kind)['path'], old)
+            self.assertEqual(self.store.dialog(42)['kind'], kind)
+            await self.send('Новое фото', photo=True)
+            material = self.store.material(42, project, kind)
+            self.assertNotEqual(material['path'], old)
+            self.assertEqual(material['description'], 'Новое фото')
+            self.assertEqual(self.store.db.execute('SELECT count(*) FROM project_materials WHERE project_id=? AND kind=?',
+                                                  (project, kind)).fetchone()[0], 1)
+
+    async def test_prompts_include_materials_and_post_reference_is_not_publishable_image(self):
+        project = await self.setup_project()
+        for field, value in [('concept', 'Кофейня'), ('tone', 'Дружелюбно'),
+                             ('text_prompt', 'Без эмодзи'), ('image_prompt', 'Квадратный формат')]:
+            self.store.configure(42, field, value)
+        self.store.set_material(42, project, 'style', '/style.jpg', 'Акварель')
+        self.store.set_material(42, project, 'character', '/cat.jpg', 'Рыжий кот')
+        self.app.text_ai.generate = AsyncMock(return_value='Наш кофе готов!')
+        await self.send('/post Расскажи про кофе. На фото замени фон на синий.', photo=True)
+        job = self.store.job(42)
+        version = self.store.revision(42, job['id'])
+        self.assertIsNone(version['image_path'])
+        self.assertIsNone(job['image_path'])
+        self.assertTrue(job['reference_path'])
+        self.assertEqual(self.app.text_ai.generate.call_args.kwargs['prompt'], version['text_prompt'])
+        for value in ('Кофейня', 'Дружелюбно', 'Без эмодзи', 'Акварель', 'Рыжий кот', 'замени фон на синий'):
+            self.assertIn(value, version['text_prompt'])
+            self.assertIn(value, version['image_prompt'])
+        self.assertIn('Квадратный формат', version['image_prompt'])
+        self.assertIn('Наш кофе готов!', version['image_prompt'])
+        self.assertEqual(json.loads(version['prompt_materials']), [
+            {'role': 'style', 'path': '/style.jpg'}, {'role': 'character', 'path': '/cat.jpg'},
+            {'role': 'reference', 'path': job['reference_path']}])
+        await self.click('Промпты')
+        self.assertIn(version['text_prompt'], self.client.sent[-2]['text'])
+        self.assertIn(version['image_prompt'], self.client.sent[-1]['text'])
+        await self.send('/revise Убери восклицательный знак')
+        current = self.store.revision(42, job['id'])
+        self.assertIn('Убери восклицательный знак', current['text_prompt'])
+        self.assertEqual(json.loads(current['prompt_materials'])[-1]['path'], job['reference_path'])
+        self.assertIsNone(current['image_path'])
+        await self.send(f"/image {job['id']}", photo=True)
+        replaced = self.store.revision(42, job['id'])
+        self.assertEqual(replaced['image_prompt'], current['image_prompt'])
+        self.assertEqual(replaced['prompt_materials'], current['prompt_materials'])
+        self.assertTrue(replaced['image_path'])
+        self.assertEqual(self.store.job(42)['reference_path'], job['reference_path'])
+
+    async def test_no_reference_is_needed_and_removed_commands_do_not_save_project_references(self):
+        await self.setup_project()
+        await self.send('/reference Больше не настройка проекта', photo=True)
+        self.assertEqual(self.store.references(42), [])
+        await self.send('/post Кофе')
+        job = self.store.job(42)
+        self.assertIsNone(job['reference_path'])
+        version = self.store.revision(42, job['id'])
+        self.assertEqual(json.loads(version['prompt_materials']), [])
+        self.assertIn('с нуля', version['image_prompt'])
 
     async def test_menu_add_select_compose_and_revise_without_commands(self):
         await self.send('/start')
@@ -201,7 +268,7 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
         job = self.store.job(42)
         self.assertEqual(job['status'], 'review')
         self.app.text_ai.generate.assert_awaited_once()
-        self.assertIn('500', self.app.text_ai.generate.call_args.args[0])
+        self.assertIn('500', self.app.text_ai.generate.call_args.kwargs['prompt'])
         await self.click('Изменить текст')
         self.app.text_ai.generate.return_value = 'Ещё короче'
         await self.send('Сократи до одного предложения')

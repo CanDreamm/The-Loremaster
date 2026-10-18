@@ -28,6 +28,35 @@ class StoreTests(unittest.TestCase):
         self.store = Store(self.path)
         self.assertEqual(self.store.project(42)['name'], 'Первый')
 
+    def test_legacy_character_photos_migrate_once_without_deleting_archive(self):
+        self.store.db.execute("DELETE FROM schema_meta WHERE name='single_project_materials'")
+        character = self.store.db.execute('INSERT INTO characters(project_id,name,description) VALUES (?,?,?)',
+                                          (self.project, 'Кот', 'Рыжий')).lastrowid
+        for path in ('/old.jpg', '/latest.jpg'):
+            self.store.db.execute('INSERT INTO character_images(character_id,path) VALUES (?,?)', (character, path))
+        self.store.reference(42, '/legacy-reference.jpg', 'Архив')
+        self.store.db.close()
+        self.store = Store(self.path)
+        self.assertEqual(self.store.material(42, self.project, 'character')['path'], '/latest.jpg')
+        self.assertEqual(self.store.db.execute('SELECT count(*) FROM character_images').fetchone()[0], 2)
+        self.assertEqual(len(self.store.references(42)), 1)
+        self.store.set_material(42, self.project, 'character', '/replacement.jpg', 'Новый')
+        self.store.set_material(42, self.project, 'style', '/style.jpg', 'Пастель')
+        self.store.db.close()
+        self.store = Store(self.path)
+        self.assertEqual(self.store.material(42, self.project, 'character')['path'], '/replacement.jpg')
+        self.assertEqual(self.store.material(42, self.project, 'style')['path'], '/style.jpg')
+
+    def test_materials_reject_foreign_project_and_keep_one_per_section(self):
+        for index in range(3):
+            self.store.set_material(42, self.project, 'style', f'/style-{index}.jpg', 'Описание')
+        self.assertEqual(self.store.material(42, self.project, 'style')['path'], '/style-2.jpg')
+        self.assertEqual(self.store.db.execute('SELECT count(*) FROM project_materials').fetchone()[0], 1)
+        with self.assertRaises(Conflict):
+            self.store.set_material(99, self.project, 'style', '/foreign.jpg')
+        with self.assertRaises(Conflict):
+            self.store.material(99, self.project, 'style')
+
     def test_owner_isolation(self):
         with self.assertRaises(Conflict):
             self.store.select(99, self.project)
@@ -94,8 +123,8 @@ class StoreTests(unittest.TestCase):
         self.store.character(42, 'Лис', 'Рыжий', '/test/front.jpg')
         self.store.character(42, 'Лис', '', '/test/side.jpg')
         character = self.store.characters(42)[0]
-        self.assertEqual(character['images'], 2)
-        self.assertEqual(character['description'], 'Рыжий')
+        self.assertEqual(character['images'], 1)
+        self.assertEqual(self.store.material(42, self.project, 'character')['path'], '/test/side.jpg')
         self.store.create_project(42, 'Другой бренд')
         self.assertEqual(self.store.characters(42), [])
 

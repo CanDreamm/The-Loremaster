@@ -5,21 +5,22 @@ import uuid
 from .providers import AmbiguousPublish, ProviderError, VkPublisher, YandexText
 from .store import Conflict
 from .menus import BotMenus, button as menu_button, keyboard, back
+from .prompts import build_prompts
 
 HELP = (
     'Публикот — помощник публикаций\n'
     '/menu — главное меню\n'
     '/id — ваш ID ВК\n/projects — назначенные проекты\n/select НОМЕР — выбрать\n'
     '/settings — настройки\n/concept Описание\n/tone Тон общения\n'
-    '/textprompt Промпт текста\n/imageprompt Промпт картинки\n/style Визуальный стиль\n'
+    '/textprompt Правила текста\n/imageprompt Правила картинки\n/style — одно фото визуального стиля с описанием\n'
     '/vk НОМЕР — сообщество для публикаций\n'
     '/connect — подключить публикации через авторизацию ВК\n/connection — статус подключения\n/disconnect — отключить OAuth-ключ проекта\n'
-    '/reference Описание — сохранить приложенное фото как референс\n/references — показать референсы\n'
-    '/character Имя | Описание — персонаж, можно с фото\n/characters — список\n'
-    '/post Тема и тезисы — подготовить пост, можно приложить фото\n'
+    '/character Описание — одно фото персонажей\n/characters — показать фото\n'
+    '/post Тема и тезисы — подготовить пост; можно приложить фото-референс и описать, что с ним сделать\n'
     '/revise Замечания — исправить текст\n/image НОМЕР — заменить картинку приложенным фото\n'
     '/jobs — задания проекта\n/job НОМЕР — открыть задание\n/status — текущее задание\n'
-    'Генерация изображений пока не подключена. Фото используется как готовая иллюстрация.'
+    'Формируются два промпта: для текста и изображения. Генерация изображений пока не подключена. '
+    'Референс не публикуется автоматически; готовое фото добавляется отдельно в предпросмотре.'
 )
 ADMIN_HELP = '\nАдминистратор: /new Название, /allow ID, /deny ID, /users, /allprojects, /assign ПРОЕКТ ID, /unassign ПРОЕКТ ID, /members ПРОЕКТ.'
 
@@ -33,6 +34,7 @@ def preview_keyboard(job, is_demo=False):
     rows.append(([button('Опубликовать', 'publish', 'positive')] if not is_demo and job['target_group'] else [])
                 + [button('Отменить черновик', 'cancel', 'negative')])
     rows.append(back(job['project_id']))
+    rows.insert(-1, [menu_button('Промпты', 'prompts', project=job['project_id'], job=job['id'])])
     return keyboard(*rows)
 
 
@@ -167,6 +169,10 @@ class VkBot(BotMenus):
         label += f"Публикация: vk.ru/club{job['target_group']}\n" if job['target_group'] else 'Сообщество публикации не задано.\n'
         if version['is_demo']:
             label += 'ДЕМО: публикация запрещена.\n'
+        if job['reference_path']:
+            label += 'Фото-референс сохранено для промпта изображения и не включено в публикацию.\n'
+        if version['image_prompt'] and not version['image_path']:
+            label += 'Промпт изображения готов. Генератор изображений пока не подключён.\n'
         await self.client.send(peer, label)
         if version['image_path']:
             await self.client.send_photo(peer, version['image_path'])
@@ -231,7 +237,7 @@ class VkBot(BotMenus):
                 raise Conflict('OAuth не настроен. Ключи из .env.python отключаются на сервере.')
             self.oauth.disconnect(actor, project['id'])
             return await self.client.send(peer, 'OAuth-ключ проекта удалён с сервера. При необходимости отзовите доступ приложению также в настройках ВК.')
-        fields = {'/concept': 'concept', '/tone': 'tone', '/textprompt': 'text_prompt', '/imageprompt': 'image_prompt', '/style': 'visual_style'}
+        fields = {'/concept': 'concept', '/tone': 'tone', '/textprompt': 'text_prompt', '/imageprompt': 'image_prompt'}
         if command in fields:
             if not args or len(args) > 12000:
                 raise Conflict('Введите значение после команды. Один дефис очищает настройку.')
@@ -245,29 +251,20 @@ class VkBot(BotMenus):
             return await self.client.send(peer, 'Сообщество публикаций сохранено. Для авторизации отправьте /connect. Старое OAuth-подключение к другому сообществу не используется.')
         if command == '/settings':
             return await self.menu(actor, peer, {'screen': 'settings', 'project': s.project(actor)['id']})
-        if command in ('/reference', '/references', '/character', '/characters'):
+        if command in ('/reference', '/references'):
+            raise Conflict('Референсы проекта убраны. Прикрепите фото к заданию /post и опишите, что с ним сделать.')
+        if command in ('/style', '/character', '/characters'):
             project = s.project(actor)
-            if command == '/references':
-                rows = s.references(actor)
-                for row in rows[-10:]:
-                    await self.client.send_photo(peer, row['path'], row['description'][:1000])
-                if not rows:
-                    await self.client.send(peer, 'Референсов нет. Прикрепите фото с подписью /reference Описание.')
-                return
             if command == '/characters':
-                rows = s.characters(actor)
-                return await self.client.send(peer, '\n'.join(f"{p['name']}: {p['description']} (фото: {p['images']})" for p in rows) or 'Персонажей нет.')
-            name, _, description = args.partition('|')
-            if command == '/character' and (not name.strip() or len(name.strip()) > 100 or len(description) > 4000):
-                raise Conflict('Используйте /character Имя | Описание. Имя до 100 символов.')
-            image = await self.photo(message, 'references')
-            if command == '/reference':
-                if not image:
-                    raise Conflict('Прикрепите фото с подписью /reference Описание.')
-                s.reference(actor, image, args[:4000], project_id=project['id'])
-            else:
-                s.character(actor, name.strip(), description.strip(), image, project_id=project['id'])
-            return await self.client.send(peer, 'Сохранено. Генератор изображений по референсам пока не подключён.')
+                return await self.project_images(actor, peer, project['id'], 'characters')
+            if len(args) > 4000:
+                raise Conflict('Описание должно быть не длиннее 4000 символов.')
+            image = await self.photo(message, 'materials')
+            if not image:
+                raise Conflict('Прикрепите одну фотографию. Описание можно добавить в подписи.')
+            kind = 'style' if command == '/style' else 'character'
+            s.set_material(actor, project['id'], kind, image, args)
+            return await self.project_images(actor, peer, project['id'], 'style' if kind == 'style' else 'characters')
         if command in ('/post', '/revise'):
             return await self.generate(actor, peer, command, args, message)
         if command == '/image':
@@ -303,12 +300,16 @@ class VkBot(BotMenus):
                 previous, feedback, brief = old['body'], args, job['brief']
             else:
                 image = await self.photo(message, 'images')
-                ident, project = s.create_job(actor, brief, image, project_id=project['id'])
+                ident, project = s.create_job(actor, brief, project_id=project['id'], reference_path=image)
                 revision = 1
-            await self.client.send(peer, 'Готовлю текст. Без подтверждения пост не публикуется.')
-            context = '\n\n'.join(filter(None, [project['concept'], project['tone'], project['text_prompt']]))
-            body = await self.text_ai.generate(context, brief, previous, feedback)
-            s.save_version(actor, ident, revision, body, self.settings.demo)
+            job = s.job(actor, ident)
+            project = dict(s.require(actor, job['project_id']))
+            materials = [s.material(actor, project['id'], kind) for kind in ('style', 'character')]
+            prompts = build_prompts(project, brief, materials, job['reference_path'], previous, feedback)
+            await self.client.send(peer, 'Формирую промпты и готовлю текст. Без подтверждения пост не публикуется.')
+            body = await self.text_ai.generate(project['concept'], brief, previous, feedback, prompt=prompts.text)
+            prompts = build_prompts(project, brief, materials, job['reference_path'], previous, feedback, body)
+            s.save_version(actor, ident, revision, body, self.settings.demo, prompts=prompts)
         except Exception:
             if ident is not None:
                 s.finish(actor, ident, 'failed')

@@ -159,12 +159,11 @@ class MenuCleanupTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.client.api.await_args_list[-2].args[0], 'messages.send')
         self.assertEqual(self.client.api.await_args_list[-1].args[0], 'messages.delete')
 
-    async def test_image_gallery_and_all_text_chunks_are_removed_on_next_button(self):
-        for index in range(4):
-            self.store.reference(42, f'/image-{index}.jpg', str(index))
-        await self.send(screen='references', project=self.project)
+    async def test_material_photo_and_all_text_chunks_are_removed_on_next_button(self):
+        self.store.set_material(42, self.project, 'style', '/style.jpg', 'Пастель')
+        await self.send(screen='style', project=self.project)
         old = self.client.tracked_messages(42)
-        self.assertEqual(len(old), 5)
+        self.assertEqual(len(old), 2)
         await self.send(screen='settings', project=self.project)
         self.assertEqual(self.deleted[-1]['message_ids'], ','.join(map(str, old)))
         self.store.configure(42, 'concept', 'Концепция' * 1000)

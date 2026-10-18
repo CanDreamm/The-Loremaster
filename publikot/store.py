@@ -74,6 +74,12 @@ class Store:
           id INTEGER PRIMARY KEY, character_id INTEGER NOT NULL REFERENCES characters(id),
           path TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS project_materials (
+          project_id INTEGER NOT NULL REFERENCES projects(id),
+          kind TEXT NOT NULL CHECK(kind IN ('style','character')),
+          path TEXT NOT NULL, description TEXT NOT NULL DEFAULT '',
+          PRIMARY KEY(project_id,kind)
+        );
         ''')
         # Аддитивная миграция сохраняет базу первой версии и её владельцев.
         columns = {r['name'] for r in self.db.execute('PRAGMA table_info(projects)')}
@@ -84,7 +90,19 @@ class Store:
         if 'image_path' not in version_columns:
             self.db.execute('ALTER TABLE versions ADD COLUMN image_path TEXT')
             self.db.execute('UPDATE versions SET image_path=(SELECT image_path FROM jobs WHERE jobs.id=versions.job_id)')
+        for field in ('text_prompt', 'image_prompt', 'prompt_materials'):
+            if field not in version_columns:
+                self.db.execute(f"ALTER TABLE versions ADD COLUMN {field} TEXT NOT NULL DEFAULT ''")
+        if 'reference_path' not in {r['name'] for r in self.db.execute('PRAGMA table_info(jobs)')}:
+            self.db.execute('ALTER TABLE jobs ADD COLUMN reference_path TEXT')
         with self.transaction():
+            if not self.db.execute("SELECT 1 FROM schema_meta WHERE name='single_project_materials'").fetchone():
+                self.db.execute("INSERT OR IGNORE INTO project_materials(project_id,kind,path,description) "
+                    "SELECT c.project_id,'character',i.path,c.name || char(10) || c.description "
+                    "FROM character_images i JOIN characters c ON c.id=i.character_id "
+                    "WHERE i.id=(SELECT MAX(i2.id) FROM character_images i2 JOIN characters c2 "
+                    "ON c2.id=i2.character_id WHERE c2.project_id=c.project_id)")
+                self.db.execute("INSERT INTO schema_meta VALUES ('single_project_materials')")
             if not self.db.execute("SELECT 1 FROM schema_meta WHERE name='project_members_backfilled'").fetchone():
                 self.db.execute("INSERT OR IGNORE INTO project_members(project_id,user_id,role) SELECT id,owner,'member' FROM projects")
                 self.db.execute("INSERT INTO schema_meta VALUES ('project_members_backfilled')")
@@ -212,22 +230,38 @@ class Store:
 
     def character(self, owner, name, description, image=None, project_id=None):
         project = self.require(owner, project_id) if project_id is not None else self.project(owner)
-        self.require(owner, project['id'])
-        with self.transaction():
-            self.db.execute('INSERT INTO characters(project_id,name,description) VALUES (?,?,?) ON CONFLICT(project_id,name) DO UPDATE SET description=CASE WHEN excluded.description <> \'\' THEN excluded.description ELSE characters.description END', (project['id'], name, description))
-            row = self.db.execute('SELECT id FROM characters WHERE project_id=? AND name=?', (project['id'], name)).fetchone()
-            if image:
-                self.db.execute('INSERT INTO character_images(character_id,path) VALUES (?,?)', (row['id'], image))
+        if not image:
+            raise Conflict('Прикрепите одну фотографию персонажа.')
+        self.set_material(owner, project['id'], 'character', image, '\n'.join(filter(None, (name, description))))
 
     def characters(self, owner, project_id=None):
         project = self.require(owner, project_id) if project_id is not None else self.project(owner)
-        return self.db.execute('SELECT c.*, (SELECT count(*) FROM character_images i WHERE i.character_id=c.id) AS images FROM characters c WHERE c.project_id=? ORDER BY c.id', (project['id'],)).fetchall()
+        row = self.material(owner, project['id'], 'character')
+        if not row:
+            return []
+        name, _, description = row['description'].partition('\n')
+        return [{'name': name or 'Персонаж', 'description': description, 'images': 1}]
 
     def character_media(self, actor):
         project = self.project(actor)
-        return self.db.execute('SELECT c.name,c.description,i.path FROM characters c '
-            'LEFT JOIN character_images i ON i.character_id=c.id WHERE c.project_id=? ORDER BY c.id,i.id',
-            (project['id'],)).fetchall()
+        row = self.material(actor, project['id'], 'character')
+        return [dict(row, name='Персонажи')] if row else []
+
+    def material(self, actor, project_id, kind):
+        self.require(actor, project_id)
+        return self.db.execute('SELECT * FROM project_materials WHERE project_id=? AND kind=?',
+                               (project_id, kind)).fetchone()
+
+    def set_material(self, actor, project_id, kind, path, description=''):
+        self.require(actor, project_id)
+        if kind not in ('style', 'character') or not path:
+            raise ValueError('Invalid material')
+        with self.transaction():
+            self.db.execute('INSERT INTO project_materials VALUES (?,?,?,?) ON CONFLICT(project_id,kind) '
+                            'DO UPDATE SET path=excluded.path,description=excluded.description',
+                            (project_id, kind, path, description))
+            if kind == 'style':
+                self.db.execute("UPDATE projects SET visual_style='' WHERE id=?", (project_id,))
 
     def select(self, owner, ident):
         self.require(owner, ident)
@@ -246,11 +280,12 @@ class Store:
         self.require(owner, project['id'])
         self.db.execute(f'UPDATE projects SET {field}=? WHERE id=?', (value, project['id']))
 
-    def create_job(self, owner, brief, image_path=None, project_id=None):
+    def create_job(self, owner, brief, image_path=None, project_id=None, reference_path=None):
         project = self.require(owner, project_id) if project_id is not None else self.project(owner)
         self.require(owner, project['id'])
         with self.transaction():
             ident = self.db.execute("INSERT INTO jobs(owner,project_id,brief,image_path,status,target_group) VALUES (?,?,?,?,'generating',?)", (owner, project['id'], brief, image_path, project['vk_group'])).lastrowid
+            self.db.execute('UPDATE jobs SET reference_path=? WHERE id=?', (reference_path, ident))
             self.db.execute('UPDATE sessions SET job_id=? WHERE owner=? AND project_id=?', (ident, owner, project['id']))
         return ident, dict(project)
 
@@ -271,13 +306,16 @@ class Store:
         job = self.job(actor, ident)
         self.db.execute('INSERT INTO sessions(owner,project_id,job_id) VALUES (?,?,?) ON CONFLICT(owner) DO UPDATE SET project_id=excluded.project_id,job_id=excluded.job_id', (actor, job['project_id'], ident))
 
-    def save_version(self, owner, ident, revision, body, demo):
+    def save_version(self, owner, ident, revision, body, demo, prompts=None):
         with self.transaction():
             job = self.job(owner, ident)
             self.require(owner, job['project_id'])
             if job['status'] != 'generating' or job['revision'] != revision:
                 raise Conflict('Задание уже изменилось.')
             self.db.execute('INSERT INTO versions(job_id,revision,body,is_demo,image_path) VALUES (?,?,?,?,?)', (ident, revision, body, int(demo), job['image_path']))
+            if prompts is not None:
+                self.db.execute('UPDATE versions SET text_prompt=?,image_prompt=?,prompt_materials=? WHERE job_id=? AND revision=?',
+                    (prompts.text, prompts.image, json.dumps(prompts.materials, ensure_ascii=False), ident, revision))
             self.db.execute("UPDATE jobs SET status='review' WHERE id=?", (ident,))
 
     def revision(self, owner, ident):
@@ -306,6 +344,8 @@ class Store:
             old = self.revision(actor, ident)
             next_revision = revision + 1
             self.db.execute('INSERT INTO versions(job_id,revision,body,is_demo,image_path) VALUES (?,?,?,?,?)', (ident, next_revision, old['body'], old['is_demo'], path))
+            self.db.execute('UPDATE versions SET text_prompt=?,image_prompt=?,prompt_materials=? WHERE job_id=? AND revision=?',
+                (old['text_prompt'], old['image_prompt'], old['prompt_materials'], ident, next_revision))
             self.db.execute('UPDATE jobs SET revision=?,image_path=? WHERE id=?', (next_revision, path, ident))
 
     def claim(self, owner, ident, revision):
