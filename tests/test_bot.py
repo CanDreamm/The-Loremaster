@@ -87,7 +87,7 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.labels(), ['Написать текст', 'Мои задания', 'Настройки проекта', 'Назад', 'Главное меню'])
         await self.click('Настройки проекта')
         self.assertEqual(self.labels(), ['Концепция', 'Тон общения', 'Правила для текста', 'Визуальный стиль',
-                                         'Персонажи', 'Назад'])
+                                         'Персонажи', 'Промпт для текста', 'Промпт для изображения', 'Назад'])
         await self.click('Назад')
         self.assertIn('Настройки проекта', self.labels())
         await self.click('Назад')
@@ -104,6 +104,7 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
                 await self.click(label)
                 self.assertIn('Сохранённое значение', self.client.sent[-1]['text'])
                 self.assertEqual(self.labels(), ['Добавить', 'Назад'])
+
                 self.assertIsNone(self.store.dialog(42))
                 await self.click('Добавить')
                 self.assertEqual(self.store.dialog(42)['project'], project)
@@ -115,6 +116,40 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(self.store.project(42)[field], 'Новое значение')
                 self.assertIn('Новое значение', self.client.sent[-1]['text'])
                 self.assertEqual(self.labels(), ['Добавить', 'Назад'])
+
+    async def test_project_prompts_are_prefilled_editable_and_bound_to_project(self):
+        from publikot.prompts import TEXT_TEMPLATE, IMAGE_TEMPLATE
+        first = await self.setup_project()
+        for label, field, base in [('Промпт для текста', 'text_template', TEXT_TEMPLATE),
+                                   ('Промпт для изображения', 'image_template', IMAGE_TEMPLATE)]:
+            await self.send('/settings')
+            await self.click(label)
+            self.assertIn(base, self.client.sent[-1]['text'])
+            self.assertEqual(self.labels(), ['Изменить', 'Назад'])
+            await self.click('Изменить')
+            await self.click('Назад')
+            self.assertEqual(self.store.project(42)[field], base)
+            await self.click('Изменить')
+            await self.send('-')
+            self.assertEqual(self.store.project(42)[field], base)
+            second = self.store.create_project(42, label)
+            await self.send('Мой промпт: ' + label)
+            self.assertEqual(self.store.require(42, first)[field], 'Мой промпт: ' + label)
+            self.assertEqual(self.store.require(42, second)[field], base)
+            self.assertEqual(self.store.project(42)['id'], first)
+        await self.send('/concept Проверяемая концепция')
+        await self.send('/tone Проверяемый тон')
+        await self.send('/post Текущее задание')
+        job = self.store.job(42)
+        old = dict(self.store.revision(42, job['id']))
+        self.assertTrue(old['text_prompt'].startswith('Мой промпт: Промпт для текста'))
+        self.assertTrue(old['image_prompt'].startswith('Мой промпт: Промпт для изображения'))
+        for prompt in (old['text_prompt'], old['image_prompt']):
+            self.assertIn('Проверяемая концепция', prompt)
+            self.assertIn('Проверяемый тон', prompt)
+            self.assertIn('Текущее задание', prompt)
+        self.store.configure(42, 'text_template', 'Следующий промпт')
+        self.assertEqual(self.store.revision(42, job['id'])['text_prompt'], old['text_prompt'])
 
     async def test_image_settings_require_photo_and_show_saved_images(self):
         await self.setup_project()

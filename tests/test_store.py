@@ -28,6 +28,29 @@ class StoreTests(unittest.TestCase):
         self.store = Store(self.path)
         self.assertEqual(self.store.project(42)['name'], 'Первый')
 
+    def test_project_prompt_defaults_and_custom_values_survive_restart(self):
+        from publikot.prompts import TEXT_TEMPLATE, IMAGE_TEMPLATE
+        self.assertEqual(self.store.project(42)['text_template'], TEXT_TEMPLATE)
+        self.assertEqual(self.store.project(42)['image_template'], IMAGE_TEMPLATE)
+        self.store.configure(42, 'text_template', 'Свой текстовый промпт')
+        self.store.configure(42, 'image_template', 'Свой промпт картинки')
+        self.store.db.close()
+        self.store = Store(self.path)
+        self.assertEqual(self.store.project(42)['text_template'], 'Свой текстовый промпт')
+        self.assertEqual(self.store.project(42)['image_template'], 'Свой промпт картинки')
+        self.store.create_project(42, 'Новый проект')
+        self.assertEqual(self.store.project(42)['text_template'], TEXT_TEMPLATE)
+        self.assertEqual(self.store.project(42)['image_template'], IMAGE_TEMPLATE)
+
+    def test_existing_projects_receive_both_base_prompts_on_upgrade(self):
+        from publikot.prompts import TEXT_TEMPLATE, IMAGE_TEMPLATE
+        self.store.db.execute('ALTER TABLE projects DROP COLUMN text_template')
+        self.store.db.execute('ALTER TABLE projects DROP COLUMN image_template')
+        self.store.db.close()
+        self.store = Store(self.path)
+        self.assertEqual(self.store.project(42)['text_template'], TEXT_TEMPLATE)
+        self.assertEqual(self.store.project(42)['image_template'], IMAGE_TEMPLATE)
+
     def test_legacy_character_photos_migrate_once_without_deleting_archive(self):
         self.store.db.execute("DELETE FROM schema_meta WHERE name='single_project_materials'")
         character = self.store.db.execute('INSERT INTO characters(project_id,name,description) VALUES (?,?,?)',

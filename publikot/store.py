@@ -3,6 +3,8 @@ import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
 
+from .prompts import TEXT_TEMPLATE, IMAGE_TEMPLATE
+
 
 class Conflict(Exception):
     pass
@@ -86,6 +88,10 @@ class Store:
         for field in ('tone', 'text_prompt', 'image_prompt', 'visual_style'):
             if field not in columns:
                 self.db.execute(f"ALTER TABLE projects ADD COLUMN {field} TEXT NOT NULL DEFAULT ''")
+        for field, template in (('text_template', TEXT_TEMPLATE), ('image_template', IMAGE_TEMPLATE)):
+            if field not in columns:
+                default = template.replace("'", "''")
+                self.db.execute(f"ALTER TABLE projects ADD COLUMN {field} TEXT NOT NULL DEFAULT '{default}'")
         version_columns = {r['name'] for r in self.db.execute('PRAGMA table_info(versions)')}
         if 'image_path' not in version_columns:
             self.db.execute('ALTER TABLE versions ADD COLUMN image_path TEXT')
@@ -274,8 +280,11 @@ class Store:
         return row
 
     def configure(self, owner, field, value):
-        if field not in ('concept', 'vk_group', 'tone', 'text_prompt', 'image_prompt', 'visual_style'):
+        if field not in ('concept', 'vk_group', 'tone', 'text_prompt', 'image_prompt', 'visual_style',
+                         'text_template', 'image_template'):
             raise ValueError('Invalid field')
+        if field in ('text_template', 'image_template') and (not value.strip() or len(value) > 12000):
+            raise Conflict('Промпт должен содержать от 1 до 12000 символов.')
         project = self.project(owner)
         self.require(owner, project['id'])
         self.db.execute(f'UPDATE projects SET {field}=? WHERE id=?', (value, project['id']))

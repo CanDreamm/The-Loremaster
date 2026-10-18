@@ -9,7 +9,8 @@ from .store import Conflict
 SHORT_PROMPT = 'Пиши короткий пост до 500 символов. Верни только готовый текст.'
 PROJECT_FIELDS = {'concept': 'Концепция', 'tone': 'Тон общения',
                   'text_prompt': 'Правила для текста', 'visual_style': 'Визуальный стиль',
-                  'image_prompt': 'Промпт изображения'}
+                  'image_prompt': 'Правила изображения',
+                  'text_template': 'Промпт для текста', 'image_template': 'Промпт для изображения'}
 
 
 def button(label, screen, **params):
@@ -135,7 +136,10 @@ class BotMenus:
                      button('Тон общения', 'field', project=project_id, field='tone')],
                     [button('Правила для текста', 'field', project=project_id, field='text_prompt'),
                      button('Визуальный стиль', 'style', project=project_id)],
-                    [button('Персонажи', 'characters', project=project_id)], back(project_id)]
+                    [button('Персонажи', 'characters', project=project_id)],
+                    [button('Промпт для текста', 'field', project=project_id, field='text_template'),
+                     button('Промпт для изображения', 'field', project=project_id, field='image_template')],
+                    back(project_id)]
             return await self.client.send(peer, f"Настройки проекта: {p['name']}\nВыберите раздел.", keyboard=keyboard(*rows))
         if screen in ('field', 'field_add'):
             field = payload['field']
@@ -146,11 +150,15 @@ class BotMenus:
             if screen == 'field':
                 value = p[field] or ('Не задано. По умолчанию: ' + SHORT_PROMPT if field == 'text_prompt' else 'Не задано.')
                 return await self.client.send(peer, f"{PROJECT_FIELDS[field]} · {p['name']}\n\n{value}", keyboard=keyboard(
-                    [button('Добавить', 'field_add', project=project_id, field=field)],
+                    [button('Изменить' if field in ('text_template', 'image_template') else 'Добавить',
+                            'field_add', project=project_id, field=field)],
                     [button('Назад', 'settings', project=project_id)]))
             return await self.prompt(actor, peer, {'kind': 'field', 'project': project_id, 'field': field},
                                      PROJECT_FIELDS[field] + ': отправьте новое значение текстом. '
-                                     'Оно заменит текущее. Один дефис очищает настройку.')
+                                     + ('Оно заменит промпт только этого проекта. Концепция, тон, материалы '
+                                        'и задание будут добавляться автоматически.'
+                                        if field in ('text_template', 'image_template') else
+                                        'Оно заменит текущее. Один дефис очищает настройку.'))
         if screen == 'connection':
             await self.command(actor, peer, '/connection', '', {})
             return await self.client.send(peer, 'Подключение сообщества к публикациям. Для подготовки текста авторизация не обязательна.',

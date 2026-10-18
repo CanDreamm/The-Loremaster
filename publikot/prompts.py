@@ -53,12 +53,12 @@ def build_prompts(project, brief, materials=(), reference_path=None, previous=''
                             'Что с ним сделать, указано в сообщении пользователя.')
     material_context = '\n\n'.join(descriptions)
     text = '\n\n'.join(filter(None, (
-        TEXT_TEMPLATE, context, material_context, 'Задание пользователя:\n' + brief,
+        project['text_template'], context, material_context, 'Задание пользователя:\n' + brief,
         'Предыдущий текст:\n' + previous if previous else '',
         'Исправления текста:\n' + feedback if feedback else '',
     )))
     image = '\n\n'.join(filter(None, (
-        IMAGE_TEMPLATE, context,
+        project['image_template'], context,
         'Правила изображения:\n' + project['image_prompt'] if project.get('image_prompt') else '',
         material_context, 'Задание пользователя:\n' + brief,
         'Согласуемый текст публикации:\n' + body if body else '',
