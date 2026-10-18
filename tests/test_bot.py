@@ -67,12 +67,12 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
                 continue
             for row in (message.get('keyboard') or {}).get('buttons', []):
                 for item in row:
-                    if item['action'].get('label') == label:
+                    if item['action'].get('label', '').lstrip('✅❌⬅️☰➕ ') == label:
                         return await self.send(user=user, payload=json.loads(item['action']['payload']))
         self.fail(f'Button not found: {label}')
 
     def labels(self):
-        return [item['action']['label'] for row in self.client.sent[-1]['keyboard']['buttons'] for item in row]
+        return [item['action']['label'].lstrip('✅❌⬅️☰➕ ') for row in self.client.sent[-1]['keyboard']['buttons'] for item in row]
 
     async def test_requested_menu_structure_and_back_navigation(self):
         project = await self.setup_project()

@@ -101,7 +101,7 @@ class PublishingFlowTests(unittest.IsolatedAsyncioTestCase):
         for message in reversed(self.messages.sent):
             for row in (message['keyboard'] or {}).get('buttons', []):
                 for item in row:
-                    if item['action']['label'] == label:
+                    if item['action']['label'].lstrip('✅❌⬅️☰➕ ') == label:
                         return await self.send(payload=json.loads(item['action']['payload']))
         self.fail('Missing button: ' + label)
 

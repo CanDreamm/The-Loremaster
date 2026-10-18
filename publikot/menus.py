@@ -20,7 +20,29 @@ def button(label, screen, **params):
 
 
 def keyboard(*rows):
-    return {'inline': True, 'buttons': list(rows)}
+    styled_rows = []
+    for row in rows:
+        styled_row = []
+        for item in row:
+            item = {**item, 'action': dict(item['action'])}
+            label = item['action'].get('label', '')
+            if label.startswith('Назад'):
+                icon, color = '⬅️', 'primary'
+            elif label == 'Главное меню':
+                icon, color = '☰', 'primary'
+            elif label == 'Добавить сообщество':
+                icon, color = '➕', 'positive'
+            elif label in ('Удалить проект', 'Да, удалить', 'Отменить черновик',
+                           'Отключить', 'Да, отключить', 'Запретить доступ'):
+                icon, color = '❌', 'negative'
+            else:
+                styled_row.append(item)
+                continue
+            item['action']['label'] = f'{icon} {label}'[:40]
+            item['color'] = color
+            styled_row.append(item)
+        styled_rows.append(styled_row)
+    return {'inline': True, 'buttons': styled_rows}
 
 
 def back(project=None):
@@ -149,13 +171,19 @@ class BotMenus:
                 'По умолчанию — короткий текст до 500 символов. Можно приложить одно фото-референс '
                 'и описать, что с ним сделать. Фото необязательно и не публикуется автоматически.')
         if screen in ('settings', 'materials'):
-            rows = [[button('Концепция', 'field', project=project_id, field='concept'),
-                     button('Тон общения', 'field', project=project_id, field='tone')],
-                    [button('Правила для текста', 'field', project=project_id, field='text_prompt'),
-                     button('Визуальный стиль', 'style', project=project_id)],
-                    [button('Персонажи', 'characters', project=project_id)],
-                    [button('Промпт для текста', 'field', project=project_id, field='text_template'),
-                     button('Промпт для изображения', 'field', project=project_id, field='image_template')],
+            def field_button(field):
+                label = ('✅ ' if p[field].strip() else '') + PROJECT_FIELDS[field]
+                return button(label, 'field', project=project_id, field=field)
+
+            def material_button(label, kind, target):
+                if self.store.material(actor, project_id, kind):
+                    label = '✅ ' + label
+                return button(label, target, project=project_id)
+
+            rows = [[field_button('concept'), field_button('tone')],
+                    [field_button('text_prompt'), material_button('Визуальный стиль', 'style', 'style')],
+                    [material_button('Персонажи', 'character', 'characters')],
+                    [field_button('text_template'), field_button('image_template')],
                     back(project_id)]
             if actor in (p['owner'], self.settings.owner_id):
                 rows.insert(-1, [button('Удалить проект', 'delete_project_confirm', project=project_id)])
