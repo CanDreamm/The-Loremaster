@@ -176,9 +176,13 @@ class VkBot(BotMenus):
         await self.client.send(peer, label)
         if version['image_path']:
             await self.client.send_photo(peer, version['image_path'])
-        await self.client.send(peer, version['body'])
+        if version['is_demo'] and version['text_prompt']:
+            await self.client.send(peer, 'Промпт для текста:\n\n' + version['text_prompt'])
+            await self.client.send(peer, 'Промпт для изображения:\n\n' + version['image_prompt'])
+        else:
+            await self.client.send(peer, version['body'])
         if job['status'] == 'review':
-            await self.client.send(peer, 'Текст готов. Можно внести замечания.' if version['is_demo']
+            await self.client.send(peer, 'Демо: промпты готовы. Можно внести замечания.' if version['is_demo']
                                    else 'Текст готов. Публикация — только после вашего подтверждения.',
                                    keyboard=preview_keyboard(job, bool(version['is_demo'])))
         else:
@@ -297,7 +301,7 @@ class VkBot(BotMenus):
             if command == '/revise':
                 job, old = s.revise(actor)
                 ident, revision = job['id'], job['revision']
-                previous, feedback, brief = old['body'], args, job['brief']
+                previous, feedback, brief = '' if old['is_demo'] else old['body'], args, job['brief']
             else:
                 image = await self.photo(message, 'images')
                 ident, project = s.create_job(actor, brief, project_id=project['id'], reference_path=image)
@@ -308,7 +312,8 @@ class VkBot(BotMenus):
             prompts = build_prompts(project, brief, materials, job['reference_path'], previous, feedback)
             await self.client.send(peer, 'Формирую промпты и готовлю текст. Без подтверждения пост не публикуется.')
             body = await self.text_ai.generate(project['concept'], brief, previous, feedback, prompt=prompts.text)
-            prompts = build_prompts(project, brief, materials, job['reference_path'], previous, feedback, body)
+            prompts = build_prompts(project, brief, materials, job['reference_path'], previous, feedback,
+                                    '' if self.settings.demo else body)
             s.save_version(actor, ident, revision, body, self.settings.demo, prompts=prompts)
         except Exception:
             if ident is not None:

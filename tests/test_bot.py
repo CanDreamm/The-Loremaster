@@ -200,6 +200,7 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_prompts_include_materials_and_post_reference_is_not_publishable_image(self):
         project = await self.setup_project()
+        self.app.settings = replace(self.settings, demo=False)
         for field, value in [('concept', 'Кофейня'), ('tone', 'Дружелюбно'),
                              ('text_prompt', 'Без эмодзи'), ('image_prompt', 'Квадратный формат')]:
             self.store.configure(42, field, value)
@@ -235,6 +236,26 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(replaced['prompt_materials'], current['prompt_materials'])
         self.assertTrue(replaced['image_path'])
         self.assertEqual(self.store.job(42)['reference_path'], job['reference_path'])
+
+    async def test_demo_sends_both_prompts_automatically_on_creation_revision_and_reopen(self):
+        await self.setup_project()
+        await self.send('/post Расскажи про кофе', photo=True)
+        job = self.store.job(42)
+        for action in ('created', 'revised', 'reopened'):
+            if action == 'revised':
+                await self.click('Изменить текст')
+                await self.send('Сделай короче')
+            elif action == 'reopened':
+                await self.send(f"/job {job['id']}")
+            version = self.store.revision(42, job['id'])
+            self.assertEqual(self.client.sent[-3]['text'], 'Промпт для текста:\n\n' + version['text_prompt'])
+            self.assertEqual(self.client.sent[-2]['text'], 'Промпт для изображения:\n\n' + version['image_prompt'])
+            self.assertNotIn('Опубликовать', self.labels())
+            self.assertNotIn('[ДЕМО', version['image_prompt'])
+            self.assertNotIn('[ДЕМО', version['text_prompt'])
+            self.assertNotIn('Согласуемый текст публикации:', version['image_prompt'])
+        self.assertFalse(any(message['text'].startswith('[ДЕМО') for message in self.client.sent))
+        self.publish.assert_not_awaited()
 
     async def test_no_reference_is_needed_and_removed_commands_do_not_save_project_references(self):
         await self.setup_project()
