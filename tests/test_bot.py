@@ -90,7 +90,7 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
         await self.click('Настройки проекта')
         self.assertEqual(self.labels(), ['Концепция', 'Тон общения', 'Правила для текста', 'Визуальный стиль',
                                          'Персонажи', 'Промпт для текста', 'Промпт для изображения',
-                                         'Площадки', 'Удалить проект', 'Назад'])
+                                         'Удалить проект', 'Назад'])
         await self.click('Назад')
         self.assertIn('Настройки проекта', self.labels())
         await self.click('Назад')

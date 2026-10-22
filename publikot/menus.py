@@ -220,8 +220,7 @@ class BotMenus(PlatformMenus):
                     [field_button('text_template'), field_button('image_template')],
                     back(project_id)]
             if actor in (p['owner'], self.settings.owner_id):
-                rows.insert(-1, [button('Площадки', 'platforms', project=project_id),
-                                 button('Удалить проект', 'delete_project_confirm', project=project_id)])
+                rows.insert(-1, [button('Удалить проект', 'delete_project_confirm', project=project_id)])
             return await self.client.send(peer, f"Настройки проекта: {p['name']}\nВыберите раздел.", keyboard=keyboard(*rows))
         if screen in ('field', 'field_add'):
             field = payload['field']
