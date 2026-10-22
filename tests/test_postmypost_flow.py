@@ -11,6 +11,7 @@ from aiohttp.test_utils import TestServer
 from publikot.platforms import Platforms
 from publikot.settings import Settings
 from publikot.store import Store
+from postmypost_contract import validate_contract
 
 
 class PostmypostHTTPFlow(unittest.IsolatedAsyncioTestCase):
@@ -34,12 +35,16 @@ class PostmypostHTTPFlow(unittest.IsolatedAsyncioTestCase):
                         'name': 'Сообщество ВК', 'connection_status': 1}], 'pages': {'total_pages': 1}})
                 if request.path == '/upload/init':
                     data = await request.json()
+                    validate_contract('InitUploadByFileRequest', data)
                     self.assertEqual(data['project_id'], 10)
                     self.assertEqual(data['size'], 11)
-                    return web.json_response({'id': 7, 'action': 'https://storage.yandexcloud.net/pmp-bucket',
+                    payload = {'id': 7, 'name': data['name'], 'size': data['size'], 'status': 5,
+                               'action': 'https://storage.yandexcloud.net/pmp-bucket',
                                               'fields': [{'key': 'key', 'value': 'upload-key'},
                                                          {'key': 'policy', 'value': 'signed+/policy=='},
-                                                         {'key': 'x-amz-signature', 'value': 'signed-signature'}]})
+                                                         {'key': 'x-amz-signature', 'value': 'signed-signature'}]}
+                    validate_contract('UploadByFile', payload)
+                    return web.json_response(payload)
                 if request.path == '/upload/complete':
                     self.assertEqual(request.query['id'], '7')
                     return web.json_response({'id': 7, 'status': 1})
@@ -47,6 +52,7 @@ class PostmypostHTTPFlow(unittest.IsolatedAsyncioTestCase):
                     return web.json_response({'id': 7, 'status': 1, 'file_id': 800})
                 if request.path == '/publications':
                     data = await request.json()
+                    validate_contract('CreatePublicationRequest', data)
                     self.assertEqual(data['publication_status'], 5)
                     self.assertEqual(data['details'][0]['content'], 'Согласованный текст')
                     self.assertEqual(data['details'][0]['file_ids'], [800])

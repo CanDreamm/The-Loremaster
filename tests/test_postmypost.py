@@ -46,6 +46,7 @@ class PostmypostClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload['account_ids'], [20])
         self.assertEqual(payload['details'][0]['file_ids'], [800])
         self.assertEqual(payload['details'][0]['content'], 'Согласованный текст')
+        self.assertEqual(payload['details'][0]['publication_type'], 1)
         self.assertEqual(result['id'], 90)
 
     async def test_lost_create_response_and_server_error_are_unknown_and_never_retried(self):
@@ -145,6 +146,19 @@ class PostmypostClientTests(unittest.IsolatedAsyncioTestCase):
                     await self.client.upload(10, str(image))
                 self.session.post.assert_not_called()
                 self.assertEqual(self.session.request.call_count, 1)
+
+    async def test_422_identifies_request_stage_and_fields_without_echoing_response(self):
+        self.session.request.return_value = response({'message': 'details.0.publication_type invalid private-pmp-token',
+            'errors': {'post_at': ['private URL https://secret.example/signed?signature=private']}}, status=422)
+        with self.assertRaises(ProviderError) as caught:
+            await self.client.create(self.target, 'Текст', None)
+        text = str(caught.exception)
+        self.assertIn('POST /publications', text)
+        self.assertIn('publication_type', text)
+        self.assertIn('post_at', text)
+        self.assertNotIn('private', text)
+        self.assertNotIn('https://', text)
+        self.assertEqual(self.session.request.call_count, 1)
 
     async def test_photo_error_never_creates_text_only_publication(self):
         self.client.upload = AsyncMock(side_effect=ProviderError('Фото не готово'))

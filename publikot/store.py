@@ -517,7 +517,10 @@ class Store(PlatformStore):
         return bool(rows) and all(r['status'] == 'failed' and not r['remote_id']
             and json.loads(r['target'])['provider'] == 'postmypost'
             and (r['error'].endswith(('Файл не отправлен.', 'Пост не отправлен.'))
-                 or r['error'] == 'Postmypost: неверные параметры загрузки.') for r in rows)
+                 or r['error'] in ('Postmypost: неверные параметры загрузки.',
+                                   'Postmypost: HTTP 422. Запрос отклонён.')
+                 or (r['error'].startswith('Postmypost: HTTP 422. ')
+                     and r['error'].endswith('Публикация не создана.'))) for r in rows)
 
     def restore_upload_draft(self, actor, ident, revision):
         with self.transaction():

@@ -180,6 +180,19 @@ class ProjectsAndPlatformsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.store.job(99, new)['status'], 'review')
         self.assertEqual(self.store.db.execute('SELECT count(*) FROM ai_requests').fetchone()[0], 0)
 
+    async def test_existing_422_rejection_can_restore_and_requires_confirmation(self):
+        self.attach()
+        self.failures[1] = ProviderError('Postmypost: HTTP 422. Запрос отклонён.')
+        ident = self.draft()
+        await self.platforms.publish(42, ident, 1)
+        self.assertTrue(self.store.can_restore_upload_failure(99, ident))
+        new = self.store.restore_upload_draft(99, ident, 1)
+        self.assertEqual(self.store.job(99, new)['status'], 'review')
+        self.assertEqual(len(self.creates), 1)
+        self.failures.clear()
+        await self.platforms.publish(99, new, 1)
+        self.assertEqual(self.store.job(99, new)['status'], 'published')
+
     async def test_queued_status_is_read_after_restart_without_resend(self):
         self.attach()
         self.status_value = 5

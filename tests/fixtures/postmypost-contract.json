@@ -1,0 +1,528 @@
+{
+  "source": "https://github.com/postmypost/python-rest-sdk",
+  "commit": "26df47eec3e9cc8d94dc8d69e022ff8fd4678580",
+  "openapi_version": "4.1.7",
+  "schemas": {
+    "CreatePublicationRequest": {
+      "$defs": {
+        "PublicationDetailEditRequest": {
+          "description": "Parameters for creating or updating publication details",
+          "properties": {
+            "account_id": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Account ID",
+              "title": "Account Id"
+            },
+            "publication_type": {
+              "$ref": "#/$defs/PublicationDetailPublicationTypeEnum"
+            },
+            "content": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Publication text",
+              "title": "Content"
+            },
+            "comment": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "First comment on the publication",
+              "title": "Comment"
+            },
+            "link": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "External link for the publication",
+              "title": "Link"
+            },
+            "title": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Publication title",
+              "title": "Title"
+            },
+            "tiktok_comment": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Allow comments on TikTok",
+              "title": "Tiktok Comment"
+            },
+            "tiktok_duet": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Allow duets on TikTok",
+              "title": "Tiktok Duet"
+            },
+            "tiktok_stitch": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Allow stitch on TikTok",
+              "title": "Tiktok Stitch"
+            },
+            "tiktok_privacy_status": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/PublicationDetailTikTokPrivacyStatusEnum"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "youtube_privacy_status": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/PublicationDetailYouTubePrivacyStatusEnum"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "x_reply_settings": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/PublicationDetailXReplySettingsEnum"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "instagram_share_to_feed": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Share to Instagram feed",
+              "title": "Instagram Share To Feed"
+            },
+            "nsfw": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Not safe for work flag",
+              "title": "Nsfw"
+            },
+            "file_ids": {
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "integer"
+                  },
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "File IDs",
+              "title": "File Ids"
+            }
+          },
+          "required": [
+            "publication_type"
+          ],
+          "title": "PublicationDetailEditRequest",
+          "type": "object"
+        },
+        "PublicationDetailPublicationTypeEnum": {
+          "description": "Publication type: 1 — post, 2 — story, 4 — reels/shorts/clips ",
+          "enum": [
+            1,
+            2,
+            4
+          ],
+          "title": "PublicationDetailPublicationTypeEnum",
+          "type": "integer"
+        },
+        "PublicationDetailTikTokPrivacyStatusEnum": {
+          "description": "TikTok publication privacy: 1 — public, 2 — friends, 3 — private ",
+          "enum": [
+            1,
+            2,
+            3
+          ],
+          "title": "PublicationDetailTikTokPrivacyStatusEnum",
+          "type": "integer"
+        },
+        "PublicationDetailXReplySettingsEnum": {
+          "description": "X reply settings: 1 — Everyone, 2 — Following, 3 — Mentioned users ",
+          "enum": [
+            1,
+            2,
+            3
+          ],
+          "title": "PublicationDetailXReplySettingsEnum",
+          "type": "integer"
+        },
+        "PublicationDetailYouTubePrivacyStatusEnum": {
+          "description": "YouTube publication privacy: 1 — public, 2 — unlisted, 3 — private ",
+          "enum": [
+            1,
+            2,
+            3
+          ],
+          "title": "PublicationDetailYouTubePrivacyStatusEnum",
+          "type": "integer"
+        },
+        "PublicationStatusEnumEdit": {
+          "description": "Statuses allowed for creation and update: 4 — draft, 5 — pending publication, 10 — template, 11 — workflow stage, 12 — approval ",
+          "enum": [
+            4,
+            5,
+            10,
+            11,
+            12
+          ],
+          "title": "PublicationStatusEnumEdit",
+          "type": "integer"
+        }
+      },
+      "description": "Request to create a publication",
+      "properties": {
+        "project_id": {
+          "description": "Project ID",
+          "title": "Project Id",
+          "type": "integer"
+        },
+        "post_at": {
+          "description": "The scheduled or actual date and time when the post is (or was) published",
+          "format": "date-time",
+          "title": "Post At",
+          "type": "string"
+        },
+        "delete_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "The scheduled date and time for automatic deletion of the pos",
+          "title": "Delete At"
+        },
+        "rubric_id": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Rubric ID",
+          "title": "Rubric Id"
+        },
+        "account_ids": {
+          "description": "List of account IDs where the publication will be posted",
+          "items": {
+            "type": "integer"
+          },
+          "title": "Account Ids",
+          "type": "array"
+        },
+        "publication_status": {
+          "$ref": "#/$defs/PublicationStatusEnumEdit"
+        },
+        "details": {
+          "description": "Publication details for each account or group of accounts",
+          "items": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/PublicationDetailEditRequest"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "title": "Details",
+          "type": "array"
+        }
+      },
+      "required": [
+        "project_id",
+        "post_at",
+        "account_ids",
+        "publication_status",
+        "details"
+      ],
+      "title": "CreatePublicationRequest",
+      "type": "object"
+    },
+    "InitUploadByFileRequest": {
+      "description": "Request to initialize direct file upload",
+      "properties": {
+        "project_id": {
+          "description": "ID Project",
+          "title": "Project Id",
+          "type": "integer"
+        },
+        "name": {
+          "description": "File name",
+          "title": "Name",
+          "type": "string"
+        },
+        "size": {
+          "description": "File size in bytes",
+          "title": "Size",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "project_id",
+        "name",
+        "size"
+      ],
+      "title": "InitUploadByFileRequest",
+      "type": "object"
+    },
+    "UploadByFile": {
+      "$defs": {
+        "UploadByFileFieldsInner": {
+          "description": "UploadByFileFieldsInner",
+          "properties": {
+            "key": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Key"
+            },
+            "value": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Value"
+            }
+          },
+          "title": "UploadByFileFieldsInner",
+          "type": "object"
+        },
+        "UploadStatusEnum": {
+          "description": "Upload status: 5 — waiting for upload, 4 — uploading, 3 — processing, 2 — error, 1 — file uploaded successfully ",
+          "enum": [
+            1,
+            2,
+            3,
+            4,
+            5
+          ],
+          "title": "UploadStatusEnum",
+          "type": "integer"
+        }
+      },
+      "description": "Parameters required for direct file upload to storage (e.g., S3).",
+      "properties": {
+        "id": {
+          "description": "Upload ID",
+          "title": "Id",
+          "type": "integer"
+        },
+        "name": {
+          "description": "File name",
+          "title": "Name",
+          "type": "string"
+        },
+        "size": {
+          "description": "File size in bytes",
+          "title": "Size",
+          "type": "integer"
+        },
+        "action": {
+          "description": "Upload endpoint URL",
+          "title": "Action",
+          "type": "string"
+        },
+        "fields": {
+          "description": "Parameters to be submitted with the file during upload",
+          "items": {
+            "$ref": "#/$defs/UploadByFileFieldsInner"
+          },
+          "title": "Fields",
+          "type": "array"
+        },
+        "status": {
+          "$ref": "#/$defs/UploadStatusEnum"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "size",
+        "action",
+        "fields",
+        "status"
+      ],
+      "title": "UploadByFile",
+      "type": "object"
+    },
+    "UploadComplete": {
+      "$defs": {
+        "UploadStatusEnum": {
+          "description": "Upload status: 5 — waiting for upload, 4 — uploading, 3 — processing, 2 — error, 1 — file uploaded successfully ",
+          "enum": [
+            1,
+            2,
+            3,
+            4,
+            5
+          ],
+          "title": "UploadStatusEnum",
+          "type": "integer"
+        }
+      },
+      "description": "UploadComplete",
+      "properties": {
+        "id": {
+          "description": "Upload ID",
+          "title": "Id",
+          "type": "integer"
+        },
+        "status": {
+          "$ref": "#/$defs/UploadStatusEnum"
+        }
+      },
+      "required": [
+        "id",
+        "status"
+      ],
+      "title": "UploadComplete",
+      "type": "object"
+    },
+    "UploadStatus": {
+      "$defs": {
+        "UploadStatusEnum": {
+          "description": "Upload status: 5 — waiting for upload, 4 — uploading, 3 — processing, 2 — error, 1 — file uploaded successfully ",
+          "enum": [
+            1,
+            2,
+            3,
+            4,
+            5
+          ],
+          "title": "UploadStatusEnum",
+          "type": "integer"
+        }
+      },
+      "description": "UploadStatus",
+      "properties": {
+        "id": {
+          "description": "Upload ID",
+          "title": "Id",
+          "type": "integer"
+        },
+        "file_id": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "File ID",
+          "title": "File Id"
+        },
+        "status": {
+          "$ref": "#/$defs/UploadStatusEnum"
+        }
+      },
+      "required": [
+        "id",
+        "status"
+      ],
+      "title": "UploadStatus",
+      "type": "object"
+    }
+  }
+}

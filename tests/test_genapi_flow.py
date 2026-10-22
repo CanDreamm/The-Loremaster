@@ -18,6 +18,7 @@ from publikot.settings import Settings
 from publikot.store import Store, Conflict
 from publikot.telegram_bot import TelegramBot
 from publikot.vk_bot import VkBot
+from postmypost_contract import validate_contract
 
 PNG = b'\x89PNG\r\n\x1a\n' + b'image-bytes'
 ARTICLE = ('Как кот открыл кофейню\n\n' + ('Я расскажу историю от первого лица. ' * 180)).strip()
@@ -100,13 +101,19 @@ class GenAPIWholeStack(unittest.IsolatedAsyncioTestCase):
                             return web.json_response({'data': [{'id': 20, 'connection_status': 1}]})
                         if route == '/pmp/upload/init':
                             image_number += 1
-                            return web.json_response({'id': image_number, 'action': 'https://test.s3.amazonaws.com/', 'fields': [{'key': 'key', 'value': 'signed-object-key'}]})
+                            data = await request.json()
+                            validate_contract('InitUploadByFileRequest', data)
+                            payload = {'id': image_number, 'name': data['name'], 'size': data['size'], 'status': 5,
+                                'action': 'https://test.s3.amazonaws.com/', 'fields': [{'key': 'key', 'value': 'signed-object-key'}]}
+                            validate_contract('UploadByFile', payload)
+                            return web.json_response(payload)
                         if route == '/pmp/upload/complete':
-                            return web.json_response({'status': 1})
+                            return web.json_response({'id': int(request.query['id']), 'status': 3})
                         if route == '/pmp/upload/status':
-                            return web.json_response({'status': 1, 'file_id': int(request.query['id']) + 800})
+                            return web.json_response({'id': int(request.query['id']), 'status': 1, 'file_id': int(request.query['id']) + 800})
                         if route == '/pmp/publications':
                             data = await request.json()
+                            validate_contract('CreatePublicationRequest', data)
                             published.append(data)
                             return web.json_response({'id': 90, 'publication_status': 5})
                         if route == '/pmp/publications/90':

@@ -1,6 +1,7 @@
 """Small Postmypost v4.1 client; no writes are automatically repeated."""
 import asyncio
 import mimetypes
+import re
 import time
 from collections import defaultdict, deque
 from datetime import datetime, timezone
@@ -12,6 +13,33 @@ from .providers import AmbiguousPublish, ProviderError
 from .http_media import PublicResolver, public_https_url
 
 BASE = 'https://api.postmypost.io/v4.1'
+
+
+def validation_fields(payload):
+    """Expose only documented field identifiers, never arbitrary upstream messages/values."""
+    allowed = ('project_id', 'account_ids', 'post_at', 'delete_at', 'rubric_id', 'publication_status',
+               'details', 'account_id', 'publication_type', 'content', 'file_ids', 'title', 'size', 'url', 'id')
+    found = set()
+    def visit(value, depth=0):
+        if depth > 6:
+            return
+        if isinstance(value, str):
+            for field in allowed:
+                if re.search(r'(?<![a-zA-Z0-9_])' + field + r'(?![a-zA-Z0-9_])', value[:4096]):
+                    found.add(field)
+            if any(label in value[:4096].lower() for label in ('publication type', 'тип публикации')):
+                found.add('publication_type')
+        elif isinstance(value, list):
+            for item in value[:30]:
+                visit(item, depth + 1)
+        elif isinstance(value, dict):
+            for key, item in list(value.items())[:30]:
+                if key in ('errors', 'errors_validation', 'error', 'message', 'field', 'attribute', 'detail'):
+                    visit(item, depth + 1)
+                else:
+                    visit(key, depth + 1)
+    visit(payload)
+    return sorted(found)
 
 
 class RequestBudget:
@@ -53,9 +81,19 @@ class Postmypost:
                 if response.status >= 500 and creating:
                     raise AmbiguousPublish('Postmypost: результат создания неизвестен. Автоматического повтора не будет.')
                 if not 200 <= response.status < 300:
+                    if response.status == 422:
+                        try:
+                            fields = validation_fields(await response.json())
+                        except (aiohttp.ClientError, ValueError):
+                            fields = []
+                        summary = ' Поля: ' + ', '.join(fields) + '.' if fields else ''
+                        outcome = ' Публикация не создана.' if creating else (
+                            ' Пост не отправлен.' if path.startswith('/upload/') else '')
+                        raise ProviderError(f'Postmypost: HTTP 422. {method} {path}. Ошибка проверки параметров.'
+                                            + summary + outcome)
                     hint = {401: 'Личный токен недействителен.', 403: 'Проверьте тариф API и права.',
                             429: 'Превышен лимит запросов; повторите позже.'}.get(response.status, 'Запрос отклонён.')
-                    raise ProviderError(f'Postmypost: HTTP {response.status}. {hint}')
+                    raise ProviderError(f'Postmypost: HTTP {response.status}. {method} {path}. {hint}')
                 result = await response.json()
                 if not isinstance(result, (dict, list)):
                     raise ValueError
@@ -145,7 +183,7 @@ class Postmypost:
         return await self.request('POST', '/publications', json={
             'project_id': int(target['remote_project']), 'account_ids': [int(target['remote_account'])],
             'post_at': datetime.now(timezone.utc).isoformat(), 'publication_status': 5,
-            'details': [{'account_id': int(target['remote_account']), 'publication_type': 'post',
+            'details': [{'account_id': int(target['remote_account']), 'publication_type': 1,
                          'content': body, 'file_ids': files}]})
 
     async def status(self, remote_id):
