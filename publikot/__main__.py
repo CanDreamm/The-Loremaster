@@ -118,7 +118,7 @@ async def run(args):
 
 def main():
     parser = argparse.ArgumentParser(description='Публикот — интерфейс ВК или Telegram через сервис')
-    parser.add_argument('--identify', action='store_true', help='Определить свой ID через /id (для Telegram запускает webhook)')
+    parser.add_argument('--identify', action='store_true', help='Определить свой ID через /id (для Telegram запускает приём событий)')
     parser.add_argument('--check', action='store_true', help='Проверить API выбранного транспорта')
     args = parser.parse_args()
     logging.basicConfig(level=logging.CRITICAL)

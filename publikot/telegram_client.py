@@ -47,13 +47,15 @@ class TelegramMessages:
                                          timeout=aiohttp.ClientTimeout(total=35),
                                          allow_redirects=False) as response:
                 if response.status != 200:
-                    raise ProviderError(f'Сервис Telegram вернул HTTP {response.status}. '
+                    raise ProviderError(f'Сервис Telegram: {method} вернул HTTP {response.status}. '
                                         'Проверьте API-ключ, разрешённый IP и методы бота.')
                 result = await response.json()
                 if not isinstance(result, dict) or result.get('ok') is not True or 'result' not in result:
                     raise ProviderError('Сервис Telegram не подтвердил выполнение запроса.')
                 return result['result']
         except (aiohttp.ClientError, TimeoutError, ValueError):
+            if method in ('getMe', 'getUpdates', 'deleteWebhook'):
+                raise ProviderError(f'Ответ сервиса на {method} не получен. Проверьте связь и разрешения метода.') from None
             raise ProviderError('Ответ сервиса Telegram не получен. Отправка могла состояться; '
                                 'при повторе используйте прежний Idempotency-Key.') from None
 
@@ -62,6 +64,22 @@ class TelegramMessages:
         if not isinstance(result, dict) or result.get('username', '').lower() != 'publikotbot':
             raise ProviderError('В сервисе выбран другой бот: ожидается @PubliKotBot.')
         return result
+
+    async def get_updates(self, offset=None, timeout=25):
+        payload = {'timeout': timeout, 'limit': 100, 'allowed_updates': ['message', 'callback_query']}
+        if offset is not None:
+            payload['offset'] = offset
+        result = await self._call('getUpdates', payload)
+        if not isinstance(result, list) or any(
+                not isinstance(item, dict) or type(item.get('update_id')) is not int
+                or not 0 <= item['update_id'] < 2**63-1 for item in result):
+            raise ProviderError('Сервис getUpdates вернул некорректный список событий.')
+        return result
+
+    async def delete_webhook(self):
+        result = await self._call('deleteWebhook', {'drop_pending_updates': False})
+        if result is not True:
+            raise ProviderError('Сервис не подтвердил отключение webhook. Отключите его в панели сервиса.')
 
     async def send(self, chat_id, text, *, request_id):
         """Caller persists one UUID per logical send and reuses it on retries."""

@@ -8,7 +8,7 @@ from aiohttp import web
 
 class TelegramInbox:
     def __init__(self, store, bot):
-        self.db, self.bot = store.db, bot
+        self.store, self.db, self.bot = store, store.db, bot
         self.wake = asyncio.Event()
         self.db.executescript('''
             CREATE TABLE IF NOT EXISTS telegram_updates (
@@ -54,6 +54,11 @@ def add_webhook(app, inbox, secret):
             raise web.HTTPNotFound()
         return await inbox.receive(request)
 
+    app.router.add_post('/telegram/webhook/{secret}', receive)
+    add_inbox_worker(app, inbox)
+
+
+def add_inbox_worker(app, inbox):
     async def lifecycle(app):
         task = asyncio.create_task(inbox.worker())
         try:
@@ -65,5 +70,4 @@ def add_webhook(app, inbox, secret):
             except asyncio.CancelledError:
                 pass
 
-    app.router.add_post('/telegram/webhook/{secret}', receive)
     app.cleanup_ctx.append(lifecycle)

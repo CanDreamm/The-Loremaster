@@ -2,7 +2,7 @@
 
 **Python 3.12+, aiohttp, SQLite.** Интерфейс работает в личных сообщениях
 [отдельного сообщества ВК](https://vk.ru/club242305804) через **Bots Long Poll**.
-Интерфейс выбирается через `BOT_TRANSPORT`: ВК или [Telegram через сервис Chatbot и webhook](docs/telegram.md).
+Интерфейс выбирается через `BOT_TRANSPORT`: ВК или [Telegram через сервис Chatbot: getUpdates или webhook](docs/telegram.md).
 Для получения сообщений ВК
 публичный вебхук не нужен; для необязательной OAuth-авторизации нужен HTTPS callback.
 

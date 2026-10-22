@@ -1,4 +1,4 @@
-"""Telegram webhook process using the existing publishing workflow."""
+"""Telegram polling or webhook process using the shared publishing workflow."""
 import asyncio
 import os
 import re
@@ -12,7 +12,8 @@ from .settings import ConfigError
 from .store import Store
 from .telegram_bot import TelegramBot
 from .telegram_client import TelegramSettings, TelegramWorkflowMessages
-from .telegram_webhook import TelegramInbox, add_webhook
+from .telegram_webhook import TelegramInbox, add_webhook, add_inbox_worker
+from .telegram_polling import TelegramPolling
 
 
 class TelegramVkOAuthProvider(VkOAuthProvider):
@@ -34,8 +35,11 @@ class TelegramVkOAuthProvider(VkOAuthProvider):
 
 async def run_telegram(settings, args):
     config = TelegramSettings.load()
+    mode = os.getenv('TELEGRAM_UPDATES_MODE', 'webhook')
+    if mode not in ('polling', 'webhook'):
+        raise ConfigError('TELEGRAM_UPDATES_MODE: polling или webhook.')
     secret = os.getenv('TELEGRAM_WEBHOOK_SECRET', '')
-    if not re.fullmatch(r'[A-Za-z0-9_-]{32,128}', secret):
+    if mode == 'webhook' and not re.fullmatch(r'[A-Za-z0-9_-]{32,128}', secret):
         raise ConfigError('Задайте TELEGRAM_WEBHOOK_SECRET: 32–128 случайных букв, цифр, _ или -.')
     if args.identify and settings.owner_id:
         print('OWNER_TELEGRAM_ID уже задан. /id в боте покажет ваш ID.', flush=True)
@@ -44,7 +48,7 @@ async def run_telegram(settings, args):
         client.vk_token = settings.bot_token
         await client.get_me()
         if args.check:
-            print('API сервиса доступен; подтверждён @PubliKotBot. Webhook и фото требуют отдельной проверки.')
+            print(f'API сервиса доступен; подтверждён @PubliKotBot. Режим: {mode}. Получение событий и фото проверяются при запуске.')
             return
         store = Store(settings.database)
         runner = None
@@ -53,17 +57,26 @@ async def run_telegram(settings, args):
             bot = TelegramBot(settings, store, client, oauth=manager)
             if args.identify:
                 # No administrator is auto-enrolled. /id is available to everyone.
-                print('Отправьте /id в @PubliKotBot после настройки webhook; затем задайте OWNER_TELEGRAM_ID и перезапустите службу.', flush=True)
+                print('Отправьте /id в @PubliKotBot после запуска приёма событий; затем задайте OWNER_TELEGRAM_ID и перезапустите службу.', flush=True)
             app = create_web_app(manager, notify=client.send) if manager else web.Application(client_max_size=1024*1024)
-            add_webhook(app, TelegramInbox(store, bot), secret)
+            inbox = TelegramInbox(store, bot)
+            if mode == 'webhook':
+                add_webhook(app, inbox, secret)
+            else:
+                add_inbox_worker(app, inbox)
             runner = web.AppRunner(app, access_log=None)
             await runner.setup()
             try:
                 await web.TCPSite(runner, '127.0.0.1', settings.oauth_port).start()
             except OSError:
-                raise ConfigError('Не удалось занять локальный порт webhook. Проверьте уже запущенную службу ВК/Telegram.') from None
-            print(f'Публикот Telegram: webhook слушает 127.0.0.1:{settings.oauth_port}. Демо: {settings.demo}', flush=True)
-            await asyncio.Event().wait()
+                raise ConfigError('Не удалось занять локальный порт бота. Проверьте уже запущенную службу ВК/Telegram.') from None
+            if mode == 'polling':
+                await client.delete_webhook()
+                print(f'Публикот Telegram: getUpdates через сервис, long polling 25 сек. Демо: {settings.demo}', flush=True)
+                await TelegramPolling(inbox, client).run()
+            else:
+                print(f'Публикот Telegram: webhook слушает 127.0.0.1:{settings.oauth_port}. Демо: {settings.demo}', flush=True)
+                await asyncio.Event().wait()
         finally:
             if runner:
                 await runner.cleanup()
