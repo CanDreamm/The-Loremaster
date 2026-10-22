@@ -25,7 +25,7 @@ def main():
         set_key(config, 'TELEGRAM_UPDATES_MODE', args.updates_mode)
         print(f'Получение событий: {args.updates_mode}. Ключ, ID и данные сохранены. Перезапустите бота.')
         if args.updates_mode == 'polling':
-            print('В сервисе отключите backend webhook и разрешите getUpdates и deleteWebhook. Ожидающие события не удаляются.')
+            print('В сервисе отключите backend webhook и разрешите getUpdates. Ожидающие события не удаляются.')
         return
     if args.show_webhook_url:
         secret = values.get('TELEGRAM_WEBHOOK_SECRET')
@@ -57,7 +57,7 @@ def main():
     if entries['TELEGRAM_UPDATES_MODE'] == 'webhook':
         print('Секретный URL для панели сервиса: python scripts/configure-telegram.py --show-webhook-url')
     else:
-        print('В сервисе отключите backend webhook и разрешите getUpdates и deleteWebhook.')
+        print('В сервисе отключите backend webhook и разрешите getUpdates.')
 
 
 if __name__ == '__main__':

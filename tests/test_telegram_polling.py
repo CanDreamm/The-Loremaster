@@ -88,18 +88,18 @@ class TelegramPollingTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ProviderError):
             await client.delete_webhook()
 
-    async def test_runtime_polling_without_secret_disables_webhook_and_starts_poller(self):
+    async def test_runtime_polling_starts_even_when_delete_webhook_is_forbidden(self):
         settings = Settings('', 1, 42, Path(self.tmp.name), transport='telegram', oauth_port=0)
         config = TelegramSettings('key', '691ae7a7-6786-4d3d-9a35-7a3689263984')
         with patch.dict(os.environ, {'TELEGRAM_UPDATES_MODE': 'polling'}, clear=True), \
                 patch('publikot.telegram_runtime.TelegramSettings.load', return_value=config), \
                 patch('publikot.telegram_runtime.TelegramWorkflowMessages.get_me', new_callable=AsyncMock), \
-                patch('publikot.telegram_runtime.TelegramWorkflowMessages.delete_webhook', new_callable=AsyncMock) as disable, \
+                patch('publikot.telegram_runtime.TelegramWorkflowMessages.delete_webhook', new_callable=AsyncMock, side_effect=ProviderError('HTTP 403')) as disable, \
                 patch('publikot.telegram_runtime.TelegramPolling.run', new_callable=AsyncMock, side_effect=asyncio.CancelledError()) as poll, \
                 patch('publikot.telegram_runtime.add_webhook') as webhook, patch('builtins.print'):
             with self.assertRaises(asyncio.CancelledError):
                 await run_telegram(settings, SimpleNamespace(check=False, identify=False))
-            disable.assert_awaited_once()
+            disable.assert_not_awaited()
             poll.assert_awaited_once()
             webhook.assert_not_called()
 

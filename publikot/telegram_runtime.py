@@ -71,7 +71,6 @@ async def run_telegram(settings, args):
             except OSError:
                 raise ConfigError('Не удалось занять локальный порт бота. Проверьте уже запущенную службу ВК/Telegram.') from None
             if mode == 'polling':
-                await client.delete_webhook()
                 print(f'Публикот Telegram: getUpdates через сервис, long polling 25 сек. Демо: {settings.demo}', flush=True)
                 await TelegramPolling(inbox, client).run()
             else:
