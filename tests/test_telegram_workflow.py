@@ -37,7 +37,8 @@ class Session:
 
     def post(self, url, **options):
         self.calls.append((url.rsplit('/', 1)[-1], options))
-        return Response({'message_id': len(self.calls)})
+        method = url.rsplit('/', 1)[-1]
+        return Response(True if method == 'deleteMessage' else {'message_id': len(self.calls)})
 
 
 class Request:
@@ -78,7 +79,7 @@ class TelegramWorkflowTests(unittest.IsolatedAsyncioTestCase):
         count = len(self.session.calls)
         await self.bot.handle_update(event)
         self.assertEqual(len(self.session.calls), count)
-        markup = self.session.calls[-1][1]['json']['reply_markup']
+        markup = next(options['json']['reply_markup'] for method, options in reversed(self.session.calls) if method == 'sendMessage')
         token = markup['inline_keyboard'][0][0]['callback_data']
         self.assertLessEqual(len(token.encode()), 64)
         self.assertEqual(self.client.callback_payload(99, token), {})
@@ -197,7 +198,7 @@ class TelegramWorkflowTests(unittest.IsolatedAsyncioTestCase):
         for text in ('/new Бренд', '/vk 123', '/post Тема'):
             await self.bot.handle_update(self.update(text))
         publisher.publish.assert_not_awaited()
-        rows = self.session.calls[-1][1]['json']['reply_markup']['inline_keyboard']
+        rows = next(options['json']['reply_markup'] for method, options in reversed(self.session.calls) if method == 'sendMessage')['inline_keyboard']
         token = next(item['callback_data'] for row in rows for item in row if item['text'] == 'Опубликовать')
         callback = {'update_id': 100, 'callback_query': {'id': 'publish-1', 'from': {'id': 42},
                     'message': {'message_id': 1, 'chat': {'id': 42, 'type': 'private'}}, 'data': token}}
@@ -212,3 +213,76 @@ class TelegramWorkflowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.store.db.execute('SELECT count(*) FROM projects').fetchone()[0], 0)
         await self.bot.handle_update(self.update('/new@PubliKotBot Новый'))
         self.assertEqual(self.store.project(42)['name'], 'Новый')
+
+    async def test_button_replaces_previous_screen_and_keeps_new_messages(self):
+        await self.bot.handle_update(self.update('/menu'))
+        previous = self.client.tracked_messages(42)
+        await self.client.send(99, 'Другой чат')
+        markup = next(options['json']['reply_markup'] for method, options in reversed(self.session.calls)
+                      if method == 'sendMessage' and 'reply_markup' in options['json'])
+        token = markup['inline_keyboard'][0][0]['callback_data']
+        callback = {'update_id': 200, 'callback_query': {'id': 'cleanup', 'from': {'id': 42},
+                    'message': {'message_id': previous[-1], 'chat': {'id': 42, 'type': 'private'}}, 'data': token}}
+        start = len(self.session.calls)
+        await self.bot.handle_update(callback)
+        calls = self.session.calls[start:]
+        self.assertEqual([method for method, _ in calls], ['answerCallbackQuery', 'sendMessage', 'deleteMessage'])
+        self.assertEqual(calls[-1][1]['json'], {'chat_id': '42', 'message_id': previous[0]})
+        self.assertTrue(self.client.tracked_messages(42))
+        self.assertTrue(set(previous).isdisjoint(self.client.tracked_messages(42)))
+        self.assertTrue(self.client.tracked_messages(99))
+        await self.bot.handle_update(callback)
+        self.assertEqual(sum(method == 'deleteMessage' for method, _ in self.session.calls), 1)
+
+    async def test_failed_deletion_keeps_new_screen_and_does_not_repeat_action(self):
+        await self.bot.handle_update(self.update('/menu'))
+        token = self.session.calls[-1][1]['json']['reply_markup']['inline_keyboard'][0][0]['callback_data']
+        original = self.client._call
+        async def call(method, payload, request_id=None):
+            if method == 'deleteMessage':
+                raise ProviderError('Сервис Telegram: deleteMessage вернул HTTP 403.')
+            return await original(method, payload, request_id)
+        self.client._call = AsyncMock(side_effect=call)
+        callback = {'update_id': 200, 'callback_query': {'id': 'cleanup-failed', 'from': {'id': 42},
+                    'message': {'message_id': 1, 'chat': {'id': 42, 'type': 'private'}}, 'data': token}}
+        with patch('builtins.print') as log:
+            await self.bot.handle_update(callback)
+            await self.bot.handle_update(callback)
+        self.assertEqual(sum(method == 'sendMessage' for method, _ in self.session.calls), 2)
+        self.assertEqual(sum(c.args[0] == 'deleteMessage' for c in self.client._call.call_args_list), 1)
+        self.assertIn('не удалены', log.call_args.args[0])
+
+    async def test_tracking_survives_client_restart_and_records_chunks_and_photos(self):
+        await self.client.send(42, 'x' * 4000)
+        photo = Path(self.tmp.name) / 'photo.jpg'
+        photo.write_bytes(b'photo')
+        photo_id = await self.client.send_photo(42, photo)
+        ids = self.client.tracked_messages(42)
+        self.assertEqual(len(ids), 3)
+        self.assertIn(photo_id, ids)
+        other = TelegramWorkflowMessages(self.client.settings, self.session)
+        other.bind_store(self.store)
+        self.assertEqual(other.tracked_messages(42), ids)
+        await other.delete_messages(99, ids)
+        self.assertFalse(any(method == 'deleteMessage' for method, _ in self.session.calls))
+        await other.delete_messages(42, ids + ids + [9999])
+        self.assertEqual(other.tracked_messages(42), [])
+        self.assertEqual(sum(method == 'deleteMessage' for method, _ in self.session.calls), 3)
+
+    async def test_successful_deletion_is_forgotten_even_when_next_deletion_fails(self):
+        self.client.remember_message(42, 10)
+        self.client.remember_message(42, 11)
+        self.client._call = AsyncMock(side_effect=[True, ProviderError('HTTP 403')])
+        with self.assertRaises(ProviderError):
+            await self.client.delete_messages(42, [10, 11])
+        self.assertEqual(self.client.tracked_messages(42), [11])
+
+    async def test_existing_clicked_bot_menu_is_tracked_for_cleanup(self):
+        token = self.client.markup(42, {'buttons': [[{'action': {'type': 'callback', 'label': 'Главная',
+            'payload': json.dumps({'action': 'menu', 'screen': 'home'})}}]]})['inline_keyboard'][0][0]['callback_data']
+        callback = {'update_id': 200, 'callback_query': {'id': 'old-menu', 'from': {'id': 42},
+                    'message': {'message_id': 9001, 'from': {'is_bot': True, 'username': 'PubliKotBot'},
+                                'chat': {'id': 42, 'type': 'private'}}, 'data': token}}
+        await self.bot.handle_update(callback)
+        self.assertEqual(self.session.calls[-1][0], 'deleteMessage')
+        self.assertEqual(self.session.calls[-1][1]['json']['message_id'], 9001)

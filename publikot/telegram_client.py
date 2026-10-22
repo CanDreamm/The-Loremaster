@@ -105,6 +105,24 @@ class TelegramWorkflowMessages(TelegramMessages):
             token TEXT PRIMARY KEY, actor INTEGER NOT NULL, payload TEXT NOT NULL,
             created INTEGER NOT NULL DEFAULT (unixepoch()))''')
 
+    def remember_message(self, peer, message_id):
+        self.store.remember_bot_message(0, peer, message_id)
+
+    def tracked_messages(self, peer):
+        return self.store.bot_message_ids(0, peer)
+
+    async def delete_messages(self, peer, message_ids):
+        # Only our recorded messages in this chat may be deleted.
+        known = set(self.tracked_messages(peer))
+        for ident in dict.fromkeys(message_ids):
+            if type(ident) is not int or ident not in known:
+                continue
+            result = await self._call('deleteMessage', {'chat_id': str(peer), 'message_id': ident}, uuid4())
+            if result is not True:
+                raise ProviderError('Сервис не подтвердил удаление сообщения Telegram.')
+            # Persist each success even if a later deletion fails.
+            self.store.forget_bot_messages(0, peer, [ident])
+
     def callback_payload(self, actor, token):
         row = self.store.db.execute('SELECT payload FROM telegram_buttons WHERE token=? AND actor=?',
                                     (token, actor)).fetchone()
@@ -144,6 +162,7 @@ class TelegramWorkflowMessages(TelegramMessages):
             sent = await self._call('sendMessage', payload, uuid4())
             if not isinstance(sent, dict) or type(sent.get('message_id')) is not int:
                 raise ProviderError('Сервис Telegram не вернул ID сообщения.')
+            self.remember_message(peer, sent['message_id'])
             result.append(sent['message_id'])
         return result
 
@@ -205,3 +224,8 @@ class TelegramWorkflowMessages(TelegramMessages):
                         raise ProviderError('Сервис не подтвердил отправку фото. Проверьте разрешение sendPhoto и multipart.')
             except (aiohttp.ClientError, TimeoutError, ValueError):
                 raise ProviderError('Ответ на отправку фото не получен. Автоматического повтора нет.') from None
+        sent = result.get('result')
+        if not isinstance(sent, dict) or type(sent.get('message_id')) is not int or sent['message_id'] <= 0:
+            raise ProviderError('Сервис Telegram не вернул ID фотографии.')
+        self.remember_message(peer, sent['message_id'])
+        return sent['message_id']

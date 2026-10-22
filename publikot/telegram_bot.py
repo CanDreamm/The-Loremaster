@@ -22,6 +22,14 @@ class TelegramBot(VkBot):
         actor = user['id']
         if callback:
             payload = self.client.callback_payload(actor, callback.get('data', ''))
+            source = message.get('from', {})
+            key = f'{self.settings.group_id}:callback:{actor}:{callback["id"]}'
+            if (payload and self.store.is_allowed(actor, self.settings.owner_id)
+                    and source.get('is_bot') is True
+                    and str(source.get('username', '')).lower() == 'publikotbot'
+                    and not self.store.db.execute('SELECT 1 FROM inbox WHERE event_id=?', (key,)).fetchone()):
+                # Also clean up a clicked menu sent before tracking was enabled.
+                self.client.remember_message(actor, message.get('message_id'))
             event = {'type': 'message_event', 'group_id': self.settings.group_id, 'object': {
                 'user_id': actor, 'peer_id': actor, 'event_id': callback['id'], 'payload': payload}}
         else:
