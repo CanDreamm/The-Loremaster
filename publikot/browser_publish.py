@@ -89,7 +89,9 @@ class BrowserPublisher:
         self.check_ready()
         if not body.strip():
             raise ProviderError('Пустой текст нельзя публиковать.')
-        if image_path and not Path(image_path).is_file():
+        from .media import paths
+        images = paths(image_path)
+        if any(not Path(path).is_file() for path in images):
             raise ProviderError('Фото публикации не найдено.')
         from playwright.async_api import async_playwright
         clicked = False
@@ -119,8 +121,9 @@ class BrowserPublisher:
                                 body.strip() if len(title) > 140 else content.strip() or body.strip())
                         else:
                             await page.locator(self.selectors['body']).fill(body)
-                        if image_path:
-                            await page.locator(self.selectors['file']).set_input_files(str(Path(image_path).resolve()))
+                        if images:
+                            files = [str(Path(path).resolve()) for path in images]
+                            await page.locator(self.selectors['file']).set_input_files(files if len(files) > 1 else files[0])
                             await page.locator(self.selectors['image_ready']).wait_for(state='visible')
                         if self.platform == 'dzen':
                             clicked = True  # A changed UI may publish at this step already.

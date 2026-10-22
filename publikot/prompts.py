@@ -53,7 +53,10 @@ def build_prompts(project, brief, materials=(), reference_path=None, previous=''
                             'Что с ним сделать, указано в сообщении пользователя.')
     material_context = '\n\n'.join(descriptions)
     text = '\n\n'.join(filter(None, (
-        project['text_template'], context, material_context, 'Задание пользователя:\n' + brief,
+        project['text_template'],
+        'Если объём и формат не заданы в правилах проекта или задании, напиши короткий пост до 500 символов. '
+        'Для статьи соблюдай запрошенные структуру и объём. Манеру речи и рассказчика бери из настроек проекта.',
+        context, material_context, 'Задание пользователя:\n' + brief,
         'Предыдущий текст:\n' + previous if previous else '',
         'Исправления текста:\n' + feedback if feedback else '',
     )))

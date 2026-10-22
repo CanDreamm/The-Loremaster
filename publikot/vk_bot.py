@@ -8,6 +8,8 @@ from .menus import BotMenus, button as menu_button, keyboard, back
 from .prompts import build_prompts
 from .browser_publish import BrowserPublisher, profile_path
 from .platforms import Platforms
+from .genapi import GenAPI
+from .media import version_images, publication_images
 
 HELP = (
     'Публикот — помощник публикаций\n'
@@ -24,8 +26,10 @@ HELP = (
     '/post Тема и тезисы — подготовить пост; можно приложить фото-референс и описать, что с ним сделать\n'
     '/revise Замечания — исправить текст\n/image НОМЕР — заменить картинку приложенным фото\n'
     '/jobs — задания проекта\n/job НОМЕР — открыть задание\n/status — текущее задание\n'
-    'Формируются два промпта: для текста и изображения. Генерация изображений пока не подключена. '
-    'Референс не публикуется автоматически; готовое фото добавляется отдельно в предпросмотре.'
+    'Текст и изображения создаются через GenAPI с настройками проекта. '
+    'После согласования текста нажмите «Создать изображения». Количество 0–3 задаётся в настройках. '
+    '/resume — проверить прерванную генерацию текста без повторного платного запроса. '
+    'Референс не публикуется автоматически.'
 )
 ADMIN_HELP = '\nАдминистратор: /new Название, /allow ID, /deny ID, /users, /allprojects, /assign ПРОЕКТ ID, /unassign ПРОЕКТ ID, /members ПРОЕКТ.'
 
@@ -36,7 +40,13 @@ def preview_keyboard(job, is_demo=False):
         return {'action': {'type': 'callback', 'label': label, 'payload': payload}, 'color': color}
     rows = [[button('Изменить текст', 'edittext'),
              button('Заменить фото' if job['image_path'] else 'Добавить фото', 'editimage')]]
-    rows.append(([button('Опубликовать', 'publish', 'positive')] if not is_demo and (job.get('destinations', '[]') != '[]' if job.get('publish_mode') == 'platforms' else job['target_group'] or job.get('browser_target')) else [])
+    context = json.loads(job.get('generation_context') or '{}')
+    count = context.get('project', {}).get('image_count', 0)
+    if not is_demo and count:
+        rows.append([button('Создать / проверить изображения', 'generateimages')])
+        for slot in range(len(version_images(job))):
+            rows.append([button(f'Изменить изображение {slot + 1}', f'regenimage{slot}')])
+    rows.append(([button('Опубликовать', 'publish', 'positive')] if not is_demo and len(version_images(job)) >= count and (job.get('destinations', '[]') != '[]' if job.get('publish_mode') == 'platforms' else job['target_group'] or job.get('browser_target')) else [])
                 + [button('Отменить черновик', 'cancel', 'negative')])
     rows.append(back(job['project_id']))
     rows.insert(-1, [menu_button('Промпты', 'prompts', project=job['project_id'], job=job['id'])])
@@ -44,9 +54,11 @@ def preview_keyboard(job, is_demo=False):
 
 
 class VkBot(BotMenus):
-    def __init__(self, settings, store, client, text_ai=None, publisher_factory=VkPublisher, oauth=None, browser_factory=BrowserPublisher, platforms=None):
+    def __init__(self, settings, store, client, text_ai=None, publisher_factory=VkPublisher, oauth=None, browser_factory=BrowserPublisher, platforms=None, image_ai=None):
         self.settings, self.store, self.client = settings, store, client
-        self.text_ai = text_ai or YandexText(settings.yandex_key, settings.yandex_folder, settings.demo)
+        self.genapi = GenAPI(settings, store)
+        self.text_ai = text_ai or (YandexText('', '', True) if settings.demo else self.genapi)
+        self.image_ai = image_ai or self.genapi
         self.publisher_factory = publisher_factory
         self.browser_factory = browser_factory
         self.oauth = oauth
@@ -174,6 +186,11 @@ class VkBot(BotMenus):
             job = self.store.job(actor, ident)
         version = self.store.revision(actor, ident)
         if version is None:
+            if job['status'] == 'failed' and job['generation_context']:
+                return await self.client.send(peer, f'Задание №{ident}: генерация текста не завершена. '
+                    'Можно проверить сохранённый запрос без повторной отправки.', keyboard=keyboard(
+                        [{'action': {'type': 'callback', 'label': 'Проверить результат ИИ',
+                           'payload': json.dumps({'action': 'resume', 'job': ident, 'revision': job['revision']})}}], back(job['project_id'])))
             raise Conflict('Черновик ещё не готов.')
         label = f"Проект №{job['project_id']}, задание №{ident}, версия {job['revision']}\n"
         if job['publish_mode'] == 'platforms':
@@ -185,11 +202,12 @@ class VkBot(BotMenus):
             label += 'ДЕМО: публикация запрещена.\n'
         if job['reference_path']:
             label += 'Фото-референс сохранено для промпта изображения и не включено в публикацию.\n'
-        if version['image_prompt'] and not version['image_path']:
-            label += 'Промпт изображения готов. Генератор изображений пока не подключён.\n'
+        context = json.loads(job['generation_context'] or '{}')
+        desired = context.get('project', {}).get('image_count', 0)
+        label += f'Изображений: {len(version_images(version))}' + (f' из {desired}' if desired else '') + '.\n'
         await self.client.send(peer, label)
-        if version['image_path']:
-            await self.client.send_photo(peer, version['image_path'])
+        for path in version_images(version):
+            await self.client.send_photo(peer, path)
         if version['is_demo'] and version['text_prompt']:
             await self.client.send(peer, 'Промпт для текста:\n\n' + version['text_prompt'])
             await self.client.send(peer, 'Промпт для изображения:\n\n' + version['image_prompt'])
@@ -305,7 +323,7 @@ class VkBot(BotMenus):
             kind = 'style' if command == '/style' else 'character'
             s.set_material(actor, project['id'], kind, image, args)
             return await self.project_images(actor, peer, project['id'], 'style' if kind == 'style' else 'characters')
-        if command in ('/post', '/revise'):
+        if command in ('/post', '/revise', '/resume'):
             return await self.generate(actor, peer, command, args, message)
         if command == '/image':
             job = s.job(actor, int(args))
@@ -321,7 +339,7 @@ class VkBot(BotMenus):
             if command == '/job':
                 s.select_job(actor, int(args))
             job = s.job(actor)
-            if job['publish_mode'] == 'platforms':
+            if job['publish_mode'] == 'platforms' or (job['status'] == 'failed' and job['generation_context']):
                 return await self.preview(actor, peer, job['id'])
             await self.client.send(peer, f"Задание №{job['id']}: {job['status']}" + ('\n' + job['remote_url'] if job['remote_url'] else ''))
             if job['status'] == 'review':
@@ -330,13 +348,22 @@ class VkBot(BotMenus):
         await self.client.send(peer, 'Список команд: /help. Фото отправляйте с подписью /post Тема.')
 
     async def generate(self, actor, peer, command, args, message):
-        if not args or len(args) > 12000:
+        if command != '/resume' and (not args or len(args) > 12000):
             raise Conflict('После команды укажите тему и тезисы либо замечания.')
         s, ident = self.store, None
         try:
             project = s.project(actor)
             previous, feedback, brief = '', '', args
-            if command == '/revise':
+            if command == '/resume':
+                job = s.job(actor)
+                if job['status'] != 'failed' or not job['generation_context']:
+                    raise Conflict('Нет прерванной генерации текста. Откройте нужное задание.')
+                ident, revision = job['id'], job['revision']
+                context = json.loads(job['generation_context'])
+                if not isinstance(self.text_ai, GenAPI):
+                    raise Conflict('Возобновление доступно для GenAPI.')
+                s.db.execute("UPDATE jobs SET status='generating' WHERE id=?", (ident,))
+            elif command == '/revise':
                 job, old = s.revise(actor)
                 ident, revision = job['id'], job['revision']
                 previous, feedback, brief = '' if old['is_demo'] else old['body'], args, job['brief']
@@ -345,18 +372,78 @@ class VkBot(BotMenus):
                 ident, project = s.create_job(actor, brief, project_id=project['id'], reference_path=image)
                 revision = 1
             job = s.job(actor, ident)
-            project = dict(s.require(actor, job['project_id']))
-            materials = [s.material(actor, project['id'], kind) for kind in ('style', 'character')]
-            prompts = build_prompts(project, brief, materials, job['reference_path'], previous, feedback)
+            if command != '/resume':
+                project = dict(s.require(actor, job['project_id']))
+                if command == '/revise' and job['generation_context']:
+                    original = json.loads(job['generation_context'])['project']
+                    project.update({key: original[key] for key in ('image_count', 'image_format')})
+                materials = [s.material(actor, project['id'], kind) for kind in ('style', 'character')]
+                context = {'project': project, 'materials': [dict(m) for m in materials if m],
+                           'brief': brief, 'previous': previous, 'feedback': feedback,
+                           'reference': job['reference_path']}
+                s.db.execute('UPDATE jobs SET generation_context=? WHERE id=?',
+                             (json.dumps(context, ensure_ascii=False), ident))
+            project, materials = context['project'], context['materials']
+            brief, previous, feedback = context['brief'], context['previous'], context['feedback']
+            prompts = build_prompts(project, brief, materials, context['reference'], previous, feedback)
             await self.client.send(peer, 'Формирую промпты и готовлю текст. Без подтверждения пост не публикуется.')
-            body = await self.text_ai.generate(project['concept'], brief, previous, feedback, prompt=prompts.text)
-            prompts = build_prompts(project, brief, materials, job['reference_path'], previous, feedback,
+            options = {'materials': prompts.materials, 'request_key': (actor, ident, revision)} if isinstance(self.text_ai, GenAPI) else {}
+            body = await self.text_ai.generate(project['concept'], brief, previous, feedback, prompt=prompts.text, **options)
+            prompts = build_prompts(project, brief, materials, context['reference'], previous, feedback,
                                     '' if self.settings.demo else body)
             s.save_version(actor, ident, revision, body, self.settings.demo, prompts=prompts)
         except Exception:
             if ident is not None:
                 s.finish(actor, ident, 'failed')
             raise
+        await self.preview(actor, peer, ident)
+
+    async def generate_images(self, actor, peer, ident, revision, slot=None, feedback=''):
+        s = self.store
+        job = s.expect_review(actor, ident, revision)
+        old = s.revision(actor, ident)
+        if self.settings.demo or old['is_demo']:
+            raise Conflict('В демо-режиме платная генерация изображений отключена.')
+        context = json.loads(job['generation_context'] or '{}')
+        project = context.get('project', dict(s.require(actor, job['project_id'])))
+        count = project['image_count']
+        if not count:
+            raise Conflict('В настройках этого задания выбрано 0 изображений.')
+        images = version_images(old)
+        if slot is not None and not 0 <= slot < len(images):
+            raise Conflict('Изображение не найдено.')
+        saved_slots = [r[0] for r in s.db.execute("SELECT slot FROM ai_requests WHERE job_id=? AND revision=? AND kind='image'", (ident, revision))]
+        slots = [slot] if slot is not None else sorted(set(saved_slots) | set(range(len(images), count)))
+        if not slots:
+            return await self.preview(actor, peer, ident)
+        # Freeze each operation; a second participant cannot start another paid call.
+        s.db.execute("UPDATE jobs SET status='generating' WHERE id=?", (ident,))
+        completed = False
+        try:
+            await self.client.send(peer, 'Создаю изображения по согласованному тексту и референсам проекта. Это может занять несколько минут.')
+            materials = json.loads(old['prompt_materials'] or '[]')
+            for index in slots:
+                prompt = old['image_prompt'] + f'\n\nИллюстрация {index + 1} из {count}. '
+                prompt += 'Выбери отдельный эпизод публикации; сохрани общих персонажей, стиль и палитру. '
+                prompt += 'Входные изображения по порядку: ' + ', '.join(m['role'] for m in materials) + '.'
+                if feedback:
+                    prompt += '\nЗамечания к этому изображению:\n' + feedback
+                inputs = list(materials)
+                if index < len(images):
+                    prompt += '\nПоследний входной референс — предыдущий вариант этой картинки. Внеси изменения, сохранив остальные детали.'
+                    inputs.append({'role': 'reference', 'path': images[index]})
+                path = await self.image_ai.generate_image(actor, ident, revision, index, prompt, inputs, project['image_format'])
+                if index < len(images):
+                    images[index] = path
+                elif index == len(images):
+                    images.append(path)
+                else:
+                    raise ProviderError('Нарушен порядок изображений. Проверьте сохранённые результаты.')
+            completed = True
+        finally:
+            s.db.execute("UPDATE jobs SET status='review' WHERE id=? AND status='generating'", (ident,))
+        if completed:
+            s.replace_images(actor, ident, revision, images)
         await self.preview(actor, peer, ident)
 
     async def connect(self, actor, peer, project_id):
@@ -383,7 +470,22 @@ class VkBot(BotMenus):
             return await self.connect(actor, peer, int(payload['project']))
         action, ident, revision = payload['action'], int(payload['job']), int(payload['revision'])
         s = self.store
+        if action == 'resume':
+            job = s.job(actor, ident)
+            if job['revision'] != revision or job['status'] != 'failed':
+                raise Conflict('Эта кнопка устарела.')
+            s.select_job(actor, ident)
+            return await self.generate(actor, peer, '/resume', '', {})
         job = s.expect_review(actor, ident, revision)
+        if action == 'generateimages':
+            return await self.generate_images(actor, peer, ident, revision)
+        if action.startswith('regenimage'):
+            slot = int(action.removeprefix('regenimage'))
+            if not 0 <= slot < len(version_images(s.revision(actor, ident))):
+                raise Conflict('Изображение не найдено.')
+            return await self.prompt(actor, peer, {'kind': 'ai_image', 'project': job['project_id'],
+                'job': ident, 'revision': revision, 'slot': slot},
+                f'Что изменить в изображении {slot + 1}? Перегенерируется только оно, остальные сохранятся.')
         if action == 'cancel':
             s.cancel(actor, ident, revision)
             return await self.client.send(peer, 'Задание отменено.', keyboard=keyboard(back(job['project_id'])))
@@ -421,7 +523,7 @@ class VkBot(BotMenus):
         try:
             publish_id = f'telegram-{ident}' if self.settings.transport == 'telegram' and not browser else ident
             url = await publisher.publish(job['browser_target'] if browser else job['target_group'],
-                                          version['body'], version['image_path'], publish_id)
+                                          version['body'], publication_images(version), publish_id)
         except AmbiguousPublish:
             s.finish(actor, ident, 'unknown')
             raise

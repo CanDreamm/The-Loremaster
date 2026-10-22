@@ -1,5 +1,6 @@
 """VK messages transport. The bot-community key is never used for wall.post."""
 import json
+import mimetypes
 import re
 import secrets
 from pathlib import Path
@@ -185,7 +186,8 @@ class VkMessages:
             raise ProviderError('ВК вернул неожиданный адрес загрузки.')
         with Path(path).open('rb') as image:
             data = aiohttp.FormData()
-            data.add_field('photo', image, filename='photo.jpg', content_type='image/jpeg')
+            data.add_field('photo', image, filename=Path(path).name,
+                           content_type=mimetypes.guess_type(path)[0] or 'image/jpeg')
             async with self.session.post(upload['upload_url'], data=data, allow_redirects=False,
                                          timeout=aiohttp.ClientTimeout(total=60)) as response:
                 if response.status != 200:

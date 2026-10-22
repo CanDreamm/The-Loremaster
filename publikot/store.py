@@ -127,8 +127,26 @@ class Store(PlatformStore):
                 self.db.execute("INSERT OR IGNORE INTO project_members(project_id,user_id,role) SELECT id,owner,'member' FROM projects")
                 self.db.execute("INSERT INTO schema_meta VALUES ('project_members_backfilled')")
         self.init_platforms()
+        for field, definition in (('image_count', 'INTEGER NOT NULL DEFAULT 1'),
+                                  ('image_format', "TEXT NOT NULL DEFAULT 'square'")):
+            if field not in columns:
+                self.db.execute(f'ALTER TABLE projects ADD COLUMN {field} {definition}')
+        for table in ('jobs', 'versions'):
+            existing = {r['name'] for r in self.db.execute(f'PRAGMA table_info({table})')}
+            if 'image_paths' not in existing:
+                self.db.execute(f"ALTER TABLE {table} ADD COLUMN image_paths TEXT NOT NULL DEFAULT '[]'")
+        if 'generation_context' not in {r['name'] for r in self.db.execute('PRAGMA table_info(jobs)')}:
+            self.db.execute("ALTER TABLE jobs ADD COLUMN generation_context TEXT NOT NULL DEFAULT ''")
+        self.db.execute('''CREATE TABLE IF NOT EXISTS ai_requests (
+            job_id INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE, revision INTEGER NOT NULL,
+            kind TEXT NOT NULL, slot INTEGER NOT NULL, model TEXT NOT NULL, status TEXT NOT NULL,
+            request_id TEXT NOT NULL DEFAULT '', result TEXT NOT NULL DEFAULT '',
+            local_path TEXT NOT NULL DEFAULT '', PRIMARY KEY(job_id,revision,kind,slot))''')
         # Не повторяем внешние операции с неизвестным результатом после перезапуска.
         self.db.execute("UPDATE jobs SET status='unknown' WHERE status='publishing'")
+        # Image generation never removes the approved text. Its request IDs survive restart.
+        self.db.execute("UPDATE jobs SET status='review' WHERE status='generating' AND EXISTS "
+                        "(SELECT 1 FROM versions WHERE job_id=jobs.id AND revision=jobs.revision)")
         self.db.execute("UPDATE jobs SET status='failed' WHERE status='generating'")
         self.db.execute("UPDATE inbox SET status='failed' WHERE status='processing'")
         # A queued Postmypost record is recoverable by read-only status checks.
@@ -342,8 +360,12 @@ class Store(PlatformStore):
 
     def configure(self, owner, field, value):
         if field not in ('concept', 'vk_group', 'tone', 'text_prompt', 'image_prompt', 'visual_style',
-                         'text_template', 'image_template'):
+                         'text_template', 'image_template', 'image_count', 'image_format'):
             raise ValueError('Invalid field')
+        if field == 'image_count' and (type(value) is not int or not 0 <= value <= 3):
+            raise Conflict('Количество изображений: от 0 до 3.')
+        if field == 'image_format' and value not in ('square', 'landscape', 'portrait'):
+            raise Conflict('Выберите квадратный, горизонтальный или вертикальный формат.')
         if field in ('text_template', 'image_template') and (not value.strip() or len(value) > 12000):
             raise Conflict('Промпт должен содержать от 1 до 12000 символов.')
         project = self.project(owner)
@@ -396,6 +418,8 @@ class Store(PlatformStore):
             if job['status'] != 'generating' or job['revision'] != revision:
                 raise Conflict('Задание уже изменилось.')
             self.db.execute('INSERT INTO versions(job_id,revision,body,is_demo,image_path) VALUES (?,?,?,?,?)', (ident, revision, body, int(demo), job['image_path']))
+            self.db.execute('UPDATE versions SET image_paths=? WHERE job_id=? AND revision=?',
+                            (job['image_paths'], ident, revision))
             if prompts is not None:
                 self.db.execute('UPDATE versions SET text_prompt=?,image_prompt=?,prompt_materials=? WHERE job_id=? AND revision=?',
                     (prompts.text, prompts.image, json.dumps(prompts.materials, ensure_ascii=False), ident, revision))
@@ -421,7 +445,21 @@ class Store(PlatformStore):
             raise Conflict('Эта кнопка устарела или задание уже обработано.')
         return job
 
-    def replace_image(self, actor, ident, revision, path):
+    def replace_image(self, actor, ident, revision, path, slot=0):
+        from .media import version_images
+        images = version_images(self.revision(actor, ident))
+        if type(slot) is not int or not 0 <= slot <= len(images) or slot > 2:
+            raise Conflict('Выберите существующее изображение или следующий свободный номер.')
+        if slot == len(images):
+            images.append(path)
+        else:
+            images[slot] = path
+        self.replace_images(actor, ident, revision, images)
+
+    def replace_images(self, actor, ident, revision, images):
+        from .media import paths
+        images = paths(images)
+        path = images[0] if images else None
         with self.transaction():
             self.expect_review(actor, ident, revision)
             old = self.revision(actor, ident)
@@ -430,6 +468,9 @@ class Store(PlatformStore):
             self.db.execute('UPDATE versions SET text_prompt=?,image_prompt=?,prompt_materials=? WHERE job_id=? AND revision=?',
                 (old['text_prompt'], old['image_prompt'], old['prompt_materials'], ident, next_revision))
             self.db.execute('UPDATE jobs SET revision=?,image_path=? WHERE id=?', (next_revision, path, ident))
+            self.db.execute('UPDATE jobs SET image_paths=? WHERE id=?', (json.dumps(images), ident))
+            self.db.execute('UPDATE versions SET image_paths=? WHERE job_id=? AND revision=?',
+                            (json.dumps(images), ident, next_revision))
 
     def claim(self, owner, ident, revision):
         with self.transaction():
@@ -440,6 +481,11 @@ class Store(PlatformStore):
             version = self.revision(owner, ident)
             if version['is_demo']:
                 raise Conflict('Демо-текст нельзя публиковать. Настройте ИИ и создайте новый пост.')
+            context = json.loads(job['generation_context'] or '{}')
+            desired = context.get('project', {}).get('image_count', 0)
+            from .media import version_images
+            if len(version_images(version)) < desired:
+                raise Conflict('Сначала создайте изображения для этой публикации. Для публикаций без фото выберите 0 в настройках и создайте новое задание.')
             if job['publish_mode'] == 'vk_api' and not job['target_group']:
                 raise Conflict('Сообщество не задано. Настройте /vk НОМЕР и создайте новый пост.')
             if job['publish_mode'] not in ('vk_api', 'platforms') and not job['browser_target']:

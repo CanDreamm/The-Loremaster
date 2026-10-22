@@ -1,4 +1,5 @@
 from pathlib import Path
+import mimetypes
 
 import aiohttp
 
@@ -69,11 +70,15 @@ class VkPublisher:
     async def publish(self, group, body, image_path, ident):
         if not self.token:
             raise ProviderError('Не задан VK_ACCESS_TOKEN.')
+        from .media import paths
+        images = paths(image_path)
+        if any(not Path(path).is_file() for path in images):
+            raise ProviderError('Фото публикации не найдено.')
         wall_started = False
         try:
             async with self.session_factory(timeout=aiohttp.ClientTimeout(total=90)) as session:
-                attachment = ''
-                if image_path:
+                attachments = []
+                for image_path in images:
                     server = await self._call(session, 'photos.getWallUploadServer', group_id=group)
                     # Загружаем файл только на HTTPS-домен ВК; токен сюда не передаём.
                     from urllib.parse import urlparse
@@ -82,17 +87,18 @@ class VkPublisher:
                         raise ProviderError('ВК вернул неожиданный адрес загрузки. Отправка остановлена.')
                     with Path(image_path).open('rb') as photo:
                         form = aiohttp.FormData()
-                        form.add_field('photo', photo, filename='photo.jpg', content_type='image/jpeg')
+                        form.add_field('photo', photo, filename=Path(image_path).name,
+                                       content_type=mimetypes.guess_type(image_path)[0] or 'image/jpeg')
                         async with session.post(server['upload_url'], data=form, allow_redirects=False) as response:
                             if response.status != 200:
                                 raise ProviderError('Не удалось загрузить фото в ВК.')
                             uploaded = await response.json(content_type=None)
                     saved = await self._call(session, 'photos.saveWallPhoto', group_id=group,
                                              photo=uploaded['photo'], server=uploaded['server'], hash=uploaded['hash'])
-                    attachment = f"photo{saved[0]['owner_id']}_{saved[0]['id']}"
+                    attachments.append(f"photo{saved[0]['owner_id']}_{saved[0]['id']}")
                 wall_started = True
                 result = await self._call(session, 'wall.post', owner_id=-group, from_group=1,
-                                          message=body, attachments=attachment, guid=str(ident))
+                                          message=body, attachments=','.join(attachments), guid=str(ident))
                 return f"https://vk.com/wall-{group}_{result['post_id']}"
         except PublishRejected:
             raise

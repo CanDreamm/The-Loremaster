@@ -26,6 +26,9 @@ class Settings:
     oauth_provider: str = 'vkid'
     oauth_port: int = 8081
     transport: str = 'vk'
+    genapi_key: str = field(default='', repr=False)
+    genapi_text_model: str = 'gpt-6-luna'
+    genapi_image_model: str = 'seedream-v5-lite'
 
     @property
     def oauth_enabled(self):
@@ -83,4 +86,6 @@ class Settings:
         return cls(token, int(group), int(owner or 0), Path(os.getenv('DATA_DIR', './data')).resolve(),
                    os.getenv('DEMO_MODE', 'true').lower() == 'true',
                    os.getenv('YANDEX_API_KEY', ''), os.getenv('YANDEX_FOLDER_ID', ''),
-                   os.getenv('TELEGRAM_VK_ACCESS_TOKEN' if transport == 'telegram' else 'VK_ACCESS_TOKEN', ''), client, secret, public, provider, int(port), transport)
+                   os.getenv('TELEGRAM_VK_ACCESS_TOKEN' if transport == 'telegram' else 'VK_ACCESS_TOKEN', ''), client, secret, public, provider, int(port), transport,
+                   os.getenv('GENAPI_API_KEY', '').strip(), os.getenv('GENAPI_TEXT_MODEL', 'gpt-6-luna'),
+                   os.getenv('GENAPI_IMAGE_MODEL', 'seedream-v5-lite'))

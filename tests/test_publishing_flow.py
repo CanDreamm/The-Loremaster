@@ -134,6 +134,7 @@ class PublishingFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status, 200, await response.text())
         await self.click('Мои проекты')
         await self.click(f"Кофейня · №{self.store.project(42)['id']}")
+        self.store.configure(42, 'image_count', 0)  # This scenario intentionally publishes text only.
         await self.click('Написать текст')
         await self.send('Напиши короткий пост про кофе')
         self.assertFalse(any(method == 'wall.post' for method, _ in self.api_calls))

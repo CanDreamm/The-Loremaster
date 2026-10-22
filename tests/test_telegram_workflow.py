@@ -195,8 +195,10 @@ class TelegramWorkflowTests(unittest.IsolatedAsyncioTestCase):
         text_ai = AsyncMock()
         text_ai.generate.return_value = 'Готовый пост'
         self.bot = TelegramBot(settings, self.store, self.client, text_ai=text_ai, publisher_factory=factory)
-        for text in ('/new Бренд', '/vk 123', '/post Тема'):
+        for text in ('/new Бренд', '/vk 123'):
             await self.bot.handle_update(self.update(text))
+        self.store.configure(42, 'image_count', 0)
+        await self.bot.handle_update(self.update('/post Тема'))
         publisher.publish.assert_not_awaited()
         rows = next(options['json']['reply_markup'] for method, options in reversed(self.session.calls) if method == 'sendMessage')['inline_keyboard']
         token = next(item['callback_data'] for row in rows for item in row if item['text'] == 'Опубликовать')

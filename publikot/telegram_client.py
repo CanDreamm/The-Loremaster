@@ -1,5 +1,6 @@
 """Telegram transport through Chatbot Hopop; never calls Telegram directly."""
 import os
+import mimetypes
 from dataclasses import dataclass, field
 from uuid import UUID, uuid4
 from pathlib import Path
@@ -279,7 +280,8 @@ class TelegramWorkflowMessages(TelegramMessages):
             form = aiohttp.FormData()
             form.add_field('chat_id', str(peer))
             form.add_field('caption', caption[:1024])
-            form.add_field('photo', photo, filename='photo.jpg', content_type='image/jpeg')
+            form.add_field('photo', photo, filename=Path(path).name,
+                           content_type=mimetypes.guess_type(path)[0] or 'image/jpeg')
             try:
                 async with self.session.post(
                     f'{self.BASE_URL}/bots/{self.settings.bot_id}/methods/sendPhoto', data=form,

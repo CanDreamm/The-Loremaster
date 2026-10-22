@@ -137,7 +137,9 @@ class Postmypost:
         raise ProviderError('Postmypost: фото не готово к публикации. Пост не отправлен.')
 
     async def create(self, target, body, image_path):
-        files = [await self.upload(target['remote_project'], image_path)] if image_path else []
+        from .media import paths
+        images = paths(image_path)
+        files = [await self.upload(target['remote_project'], path) for path in images]
         return await self.request('POST', '/publications', json={
             'project_id': int(target['remote_project']), 'account_ids': [int(target['remote_account'])],
             'post_at': datetime.now(timezone.utc).isoformat(), 'publication_status': 5,

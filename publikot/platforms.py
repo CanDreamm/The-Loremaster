@@ -9,6 +9,7 @@ from .oauth import Vault
 from .postmypost import Postmypost, RequestBudget
 from .providers import AmbiguousPublish, ProviderError
 from .store import Conflict
+from .media import publication_images
 
 
 class Platforms:
@@ -89,7 +90,7 @@ class Platforms:
                     s.delivery_update(actor, ident, dest, 'sending')
                     if target['provider'] == 'postmypost':
                         client = self.pmp(target['credential_owner'], session, secret)
-                        result = await client.create(target, version['body'], version['image_path'])
+                        result = await client.create(target, version['body'], publication_images(version))
                         remote = result.get('id')
                         if type(remote) is not int or remote <= 0:
                             raise AmbiguousPublish('Postmypost не вернул ID; проверьте кабинет, повтора не будет.')
@@ -97,7 +98,7 @@ class Platforms:
                         self.record_status(actor, ident, dest, result)
                     else:
                         client = self.dzen_factory(json.loads(secret), session)
-                        remote, url = await client.publish(target, version['body'], version['image_path'],
+                        remote, url = await client.publish(target, version['body'], publication_images(version),
                             lambda draft: s.delivery_update(actor, ident, dest, 'sending', remote_id=draft))
                         s.delivery_update(actor, ident, dest, 'published', remote_id=remote, url=url)
                 except AmbiguousPublish as error:

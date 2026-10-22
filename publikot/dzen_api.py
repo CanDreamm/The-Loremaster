@@ -96,7 +96,9 @@ class DzenAPI:
             raise ProviderError('Сеанс Дзена принадлежит другому каналу.')
         if not body.strip():
             raise ProviderError('Нельзя отправить пустую статью.')
-        if image_path and not Path(image_path).is_file():
+        from .media import paths
+        images = paths(image_path)
+        if any(not Path(path).is_file() for path in images):
             raise ProviderError('Фотография не найдена; статья не отправлена.')
         created = await self.request('add-publication', json={
             'title': '', 'publisherId': self.publisher, 'publicationType': 'article'})
@@ -105,8 +107,8 @@ class DzenAPI:
         if not isinstance(ident, str) or not re.fullmatch(r'[A-Za-z0-9_-]{8,100}', ident):
             raise ProviderError('Дзен не вернул ID черновика. Финальная отправка не выполнялась.')
         remember_draft(ident)
-        image_id = None
-        if image_path:
+        image_ids = []
+        for image_path in images:
             image = Path(image_path)
             form = aiohttp.FormData()
             with image.open('rb') as handle:
@@ -116,17 +118,18 @@ class DzenAPI:
             image_id = uploaded.get('id')
             if not isinstance(image_id, str) or not image_id:
                 raise ProviderError('Дзен не подтвердил загрузку фото; статья не отправлена.')
+            image_ids.append(image_id)
         title = body.strip().split('\n')[0][:140]
         blocks = []
-        if image_id:
+        for image_id in image_ids:
             blocks.append({'key': uuid.uuid4().hex[:5], 'text': '', 'type': 'atomic:image',
                            'depth': 0, 'inlineStyleRanges': [], 'entityRanges': [], 'data': {'image': {'id': image_id}}})
         # Keep all approved text; never interpret it as HTML or silently omit a long title.
         blocks.append({'key': uuid.uuid4().hex[:5], 'text': body, 'type': 'unstyled',
                        'depth': 0, 'inlineStyleRanges': [], 'entityRanges': [], 'data': {}})
         preview = {'title': title, 'snippet': '', 'galleryPreviewImages': []}
-        if image_id:
-            preview['image'] = {'id': image_id}
+        if image_ids:
+            preview['image'] = {'id': image_ids[0]}
         payload = {'id': ident, 'preview': preview, 'snippetFrozen': False, 'hasNativeAds': False,
                    'commentsFlagState': 'on', 'delayedPublicationFlagState': 'off',
                    'visibleComments': 'subscribe-visible', 'visibilityType': 'all',
