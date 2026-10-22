@@ -77,7 +77,7 @@ class MenuCleanupTests(unittest.IsolatedAsyncioTestCase):
         await self.click(json.loads(first['payload']))
         self.assertEqual(len(self.answers), 1)
         self.assertEqual(self.deleted[-1]['message_ids'], str(source))
-        self.assertIn('сообществ', self.sent[-1]['message'].lower())
+        self.assertIn('проект', self.sent[-1]['message'].lower())
         self.assertEqual(self.store.db.execute('SELECT count(*) FROM inbox').fetchone()[0], 2)
 
     async def test_callback_starts_input_and_regular_text_saves_setting(self):

@@ -6,6 +6,8 @@ from .providers import AmbiguousPublish, ProviderError, VkPublisher, YandexText
 from .store import Conflict
 from .menus import BotMenus, button as menu_button, keyboard, back
 from .prompts import build_prompts
+from .browser_publish import BrowserPublisher, profile_path
+from .platforms import Platforms
 
 HELP = (
     'Публикот — помощник публикаций\n'
@@ -14,6 +16,9 @@ HELP = (
     '/settings — настройки\n/concept Описание\n/tone Тон общения\n'
     '/textprompt Правила текста\n/imageprompt Правила картинки\n/style — одно фото визуального стиля с описанием\n'
     '/vk НОМЕР — сообщество для публикаций\n'
+    '/browser vk ССЫЛКА — публикация ВК через браузер\n'
+    '/browser dzen ССЫЛКА — публикация статьи в Дзен через браузер\n'
+    '/postmypost — личный токен Postmypost\n/platforms — площадки проекта\n'
     '/connect — подключить публикации через авторизацию ВК\n/connection — статус подключения\n/disconnect — отключить OAuth-ключ проекта\n'
     '/character Описание — одно фото персонажей\n/characters — показать фото\n'
     '/post Тема и тезисы — подготовить пост; можно приложить фото-референс и описать, что с ним сделать\n'
@@ -31,7 +36,7 @@ def preview_keyboard(job, is_demo=False):
         return {'action': {'type': 'callback', 'label': label, 'payload': payload}, 'color': color}
     rows = [[button('Изменить текст', 'edittext'),
              button('Заменить фото' if job['image_path'] else 'Добавить фото', 'editimage')]]
-    rows.append(([button('Опубликовать', 'publish', 'positive')] if not is_demo and job['target_group'] else [])
+    rows.append(([button('Опубликовать', 'publish', 'positive')] if not is_demo and (job.get('destinations', '[]') != '[]' if job.get('publish_mode') == 'platforms' else job['target_group'] or job.get('browser_target')) else [])
                 + [button('Отменить черновик', 'cancel', 'negative')])
     rows.append(back(job['project_id']))
     rows.insert(-1, [menu_button('Промпты', 'prompts', project=job['project_id'], job=job['id'])])
@@ -39,11 +44,13 @@ def preview_keyboard(job, is_demo=False):
 
 
 class VkBot(BotMenus):
-    def __init__(self, settings, store, client, text_ai=None, publisher_factory=VkPublisher, oauth=None):
+    def __init__(self, settings, store, client, text_ai=None, publisher_factory=VkPublisher, oauth=None, browser_factory=BrowserPublisher, platforms=None):
         self.settings, self.store, self.client = settings, store, client
         self.text_ai = text_ai or YandexText(settings.yandex_key, settings.yandex_folder, settings.demo)
         self.publisher_factory = publisher_factory
+        self.browser_factory = browser_factory
         self.oauth = oauth
+        self.platforms = platforms or Platforms(settings, store)
         if hasattr(client, 'bind_store'):
             client.bind_store(store)
 
@@ -91,8 +98,8 @@ class VkBot(BotMenus):
         except ValueError:
             await self.client.send(peer, 'Проверьте числовые ID и аргументы команды. Справка: /help.', keyboard=keyboard(back()))
         except sqlite3.IntegrityError:
-            await self.client.send(peer, 'Запись уже существует. Выберите другое название или откройте список сообществ.',
-                                   keyboard=keyboard([menu_button('Мои сообщества', 'communities')], back()))
+            await self.client.send(peer, 'Запись уже существует. Выберите другое название или откройте список проектов.',
+                                   keyboard=keyboard([menu_button('Мои проекты', 'communities')], back()))
         except Exception:
             self.store.end_event(key, False)
             raise
@@ -162,11 +169,18 @@ class VkBot(BotMenus):
 
     async def preview(self, actor, peer, ident):
         job = self.store.job(actor, ident)
+        if job['publish_mode'] == 'platforms' and job['status'] not in ('review', 'generating', 'cancelled'):
+            await self.platforms.refresh(actor, ident)
+            job = self.store.job(actor, ident)
         version = self.store.revision(actor, ident)
         if version is None:
             raise Conflict('Черновик ещё не готов.')
         label = f"Проект №{job['project_id']}, задание №{ident}, версия {job['revision']}\n"
-        label += f"Публикация: vk.ru/club{job['target_group']}\n" if job['target_group'] else 'Сообщество публикации не задано.\n'
+        if job['publish_mode'] == 'platforms':
+            targets = json.loads(job['destinations'])
+            label += 'Получатели:\n' + ('\n'.join(f"• {t['name']} ({t['channel']})" for t in targets) or 'Площадки не подключены.') + '\n'
+        else:
+            label += f"Публикация: vk.ru/club{job['target_group']}\n" if job['target_group'] else 'Площадки публикации не заданы.\n'
         if version['is_demo']:
             label += 'ДЕМО: публикация запрещена.\n'
         if job['reference_path']:
@@ -186,7 +200,8 @@ class VkBot(BotMenus):
                                    else 'Текст готов. Публикация — только после вашего подтверждения.',
                                    keyboard=preview_keyboard(job, bool(version['is_demo'])))
         else:
-            await self.client.send(peer, 'Выберите следующее действие.', keyboard=keyboard(back(job['project_id'])))
+            report = self.platforms.report(actor, ident) if job['publish_mode'] == 'platforms' else 'Выберите следующее действие.'
+            await self.client.send(peer, report, keyboard=keyboard(back(job['project_id'])))
 
     async def command(self, actor, peer, command, args, message):
         s, admin = self.store, self.settings.owner_id
@@ -221,10 +236,31 @@ class VkBot(BotMenus):
             return await self.communities(actor, peer)
         if command == '/select':
             return await self.workspace(actor, peer, int(args))
+        if command == '/postmypost':
+            return await self.menu(actor, peer, {'screen': 'pmp'})
+        if command == '/platforms':
+            return await self.menu(actor, peer, {'screen': 'platforms', 'project': s.project(actor)['id']})
+        if command == '/browser':
+            platform, _, target = args.partition(' ')
+            s.browser_destination(actor, platform, target.strip())
+            project = s.project(actor)
+            return await self.client.send(peer,
+                f"Площадка сохранена: {project['browser_target']}\n"
+                'Вход в аккаунт выполняется на компьютере с ботом: см. docs/browser-publishing.md. '
+                'После входа создайте новое задание. Ключ публикации не нужен.')
         if command == '/connect':
             return await self.connect(actor, peer, s.project(actor)['id'])
         if command == '/connection':
             project = s.project(actor)
+            if project['publish_mode'] == 'platforms':
+                return await self.menu(actor, peer, {'screen': 'platforms', 'project': project['id']})
+            if project['publish_mode'] != 'vk_api':
+                platform = project['publish_mode'].removesuffix('_browser')
+                ready = (profile_path(self.settings.data_dir, project['id'], platform) / '.login-complete').is_file()
+                return await self.client.send(peer,
+                    f"Браузер · {platform}: {project['browser_target']}\n"
+                    + ('Профиль создан; вход и права проверяются при публикации.' if ready else
+                       'Сначала выполните вход на компьютере с ботом: docs/browser-publishing.md.'))
             row = self.oauth.status(actor, project['id']) if self.oauth else None
             if row:
                 state = {'active': 'подключено', 'disconnected': 'отключено'}.get(row['status'], 'не подключено')
@@ -285,6 +321,8 @@ class VkBot(BotMenus):
             if command == '/job':
                 s.select_job(actor, int(args))
             job = s.job(actor)
+            if job['publish_mode'] == 'platforms':
+                return await self.preview(actor, peer, job['id'])
             await self.client.send(peer, f"Задание №{job['id']}: {job['status']}" + ('\n' + job['remote_url'] if job['remote_url'] else ''))
             if job['status'] == 'review':
                 await self.preview(actor, peer, job['id'])
@@ -323,7 +361,8 @@ class VkBot(BotMenus):
 
     async def connect(self, actor, peer, project_id):
         if not self.oauth or not self.oauth.settings.oauth_enabled:
-            raise Conflict('Авторизация пока не настроена администратором. Нужны приложение ВК и публичный HTTPS-адрес возврата.')
+            return await self.client.send(peer, 'Для публикаций без API добавьте проект и выберите площадку. Вход выполняется через браузер на компьютере с ботом.',
+                keyboard=keyboard([menu_button('Добавить проект без API', 'add_browser')], back()))
         if project_id is None:
             url = self.oauth.begin_import(actor, short=True)
             return await self.client.send(peer, 'Войдите в ВК тем аккаунтом, из которого пишете боту, и разрешите доступ. '
@@ -357,18 +396,32 @@ class VkBot(BotMenus):
         if action != 'publish':
             raise Conflict('Неизвестная кнопка.')
         project = s.require(actor, job['project_id'])
-        if project['vk_group'] != job['target_group']:
-            raise Conflict('Сообщество проекта изменилось. Создайте новое задание для текущего сообщества.')
-        if self.oauth and self.oauth.has_connection(job['project_id']):
-            token = self.oauth.token_for(actor, job['project_id'], job['target_group'])
+        if job['publish_mode'] == 'platforms':
+            report = await self.platforms.publish(actor, ident, revision)
+            return await self.client.send(peer, report, keyboard=keyboard(back(job['project_id'])))
+        if any(project[key] != job[key] for key in ('publish_mode', 'browser_target')):
+            raise Conflict('Площадка проекта изменилась. Создайте новое задание.')
+        browser = job['publish_mode'] != 'vk_api'
+        token = None
+        if browser:
+            platform = job['publish_mode'].removesuffix('_browser')
+            publisher = self.browser_factory(self.settings.data_dir, job['project_id'], platform)
+            publisher.check_ready()
         else:
-            token = self.settings.vk_token_for(actor, job['project_id'])
-        if not token:
-            raise Conflict('Нет действующего ключа публикации. Выполните /connect для выбранного проекта. Ключ сообщества бота не используется.')
+            if project['vk_group'] != job['target_group']:
+                raise Conflict('Сообщество проекта изменилось. Создайте новое задание для текущего сообщества.')
+            if self.oauth and self.oauth.has_connection(job['project_id']):
+                token = self.oauth.token_for(actor, job['project_id'], job['target_group'])
+            else:
+                token = self.settings.vk_token_for(actor, job['project_id'])
+            if not token:
+                raise Conflict('Нет действующего ключа публикации. Выполните /connect или настройте /browser vk ССЫЛКА.')
+            publisher = self.publisher_factory(token)
         job, version = s.claim(actor, ident, revision)
         try:
-            publish_id = f'telegram-{ident}' if self.settings.transport == 'telegram' else ident
-            url = await self.publisher_factory(token).publish(job['target_group'], version['body'], version['image_path'], publish_id)
+            publish_id = f'telegram-{ident}' if self.settings.transport == 'telegram' and not browser else ident
+            url = await publisher.publish(job['browser_target'] if browser else job['target_group'],
+                                          version['body'], version['image_path'], publish_id)
         except AmbiguousPublish:
             s.finish(actor, ident, 'unknown')
             raise
@@ -377,6 +430,6 @@ class VkBot(BotMenus):
             raise
         except Exception:
             s.finish(actor, ident, 'unknown')
-            raise ProviderError('Результат публикации неизвестен. Проверьте стену; повтора не будет.') from None
+            raise ProviderError('Результат публикации неизвестен. Проверьте площадку; повтора не будет.') from None
         s.finish(actor, ident, 'published', url)
         await self.client.send(peer, 'Опубликовано: ' + url, keyboard=keyboard(back(job['project_id'])))

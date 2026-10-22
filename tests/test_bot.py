@@ -79,22 +79,22 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
     async def test_requested_menu_structure_and_back_navigation(self):
         project = await self.setup_project()
         await self.send('/menu')
-        self.assertEqual(self.labels(), ['Мои сообщества', 'Управление доступом', 'Помощь'])
+        self.assertEqual(self.labels(), ['Мои проекты', 'Мой Postmypost', 'Управление доступом', 'Помощь'])
         await self.click('Управление доступом')
-        self.assertEqual(self.labels(), ['Разрешить доступ', 'Запретить доступ', 'Участники бота', 'Главное меню'])
+        self.assertEqual(self.labels(), ['Разрешить доступ', 'Запретить доступ', 'Участники бота', 'Назначить проект', 'Снять назначение', 'Главное меню'])
         await self.click('Главное меню')
-        await self.click('Мои сообщества')
-        self.assertIn('Добавить сообщество', self.labels())
+        await self.click('Мои проекты')
+        self.assertIn('Добавить проект', self.labels())
         await self.click(f'Бренд · №{project}')
-        self.assertEqual(self.labels(), ['Написать текст', 'Мои задания', 'Настройки проекта', 'Назад', 'Главное меню'])
+        self.assertEqual(self.labels(), ['Написать текст', 'Мои задания', 'Настройки проекта', 'Площадки', 'Участники', 'Назад', 'Главное меню'])
         await self.click('Настройки проекта')
         self.assertEqual(self.labels(), ['Концепция', 'Тон общения', 'Правила для текста', 'Визуальный стиль',
                                          'Персонажи', 'Промпт для текста', 'Промпт для изображения',
-                                         'Удалить проект', 'Назад'])
+                                         'Площадки', 'Удалить проект', 'Назад'])
         await self.click('Назад')
         self.assertIn('Настройки проекта', self.labels())
         await self.click('Назад')
-        self.assertIn('Добавить сообщество', self.labels())
+        self.assertIn('Добавить проект', self.labels())
 
     async def test_project_deletion_requires_fresh_confirmation_and_returns_to_list(self):
         project = await self.setup_project()
@@ -111,7 +111,7 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
         await self.click('Удалить проект')
         await self.click('Да, удалить')
         self.assertEqual(self.store.projects(42), [])
-        self.assertIn('Добавить сообщество', self.labels())
+        self.assertIn('Добавить проект', self.labels())
         await self.send('/new Новый проект')
         self.assertGreater(self.store.project(42)['id'], project)
         await self.send('/post Новый черновик')
@@ -342,8 +342,9 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
     async def test_menu_add_select_compose_and_revise_without_commands(self):
         await self.send('/start')
         self.enable_oauth()
-        await self.click('Мои сообщества')
-        url = await self.click('Добавить сообщество')
+        await self.click('Мои проекты')
+        await self.send(payload={'action': 'menu', 'screen': 'add'})
+        url = await self.click('Выбрать сообщества ВК')
         from urllib.parse import parse_qs, urlsplit
         state = parse_qs(urlsplit(url).query)['state'][0]
         row = await self.app.oauth.prepare_import(state, 'code', 'device')
@@ -380,13 +381,15 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
         provider.validate_selected = AsyncMock()
         self.app.oauth = OAuthManager(settings, self.store, provider)
 
-    async def test_add_requires_oauth_without_creating_empty_project(self):
+    async def test_add_project_without_oauth_or_token(self):
         await self.send('/start')
-        await self.click('Мои сообщества')
-        await self.click('Добавить сообщество')
-        self.assertIn('Авторизация пока не настроена', self.client.sent[-1]['text'])
+        await self.click('Мои проекты')
+        await self.click('Добавить проект')
         self.assertEqual(self.store.projects(42), [])
-        self.assertIsNone(self.store.dialog(42))
+        await self.send('Новый проект')
+        self.assertEqual(self.store.project(42)['name'], 'Новый проект')
+        self.assertEqual(self.store.project(42)['publish_mode'], 'platforms')
+        self.assertIn('Площадки', self.labels())
 
     async def test_legacy_add_dialog_redirects_to_authorization_without_saving_key(self):
         self.enable_oauth()
@@ -399,26 +402,14 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn('legacy-private-key', str(self.client.sent))
         self.assertEqual(self.client.sent[-1]['keyboard']['buttons'][0][0]['action']['type'], 'open_link')
 
-    async def test_allowed_member_opens_authorization_directly_from_add_button(self):
-        from urllib.parse import parse_qs, urlsplit
-        self.enable_oauth()
+    async def test_allowed_member_creates_their_own_project_without_oauth(self):
         await self.send('/allow 99')
         await self.send('/start', user=99)
-        await self.click('Мои сообщества', user=99)
-        count = len(self.client.sent)
-        url = await self.click('Добавить сообщество', user=99)
-        self.assertEqual(len(self.client.sent), count)
-        self.assertIsNone(self.store.dialog(99))
-        params = parse_qs(urlsplit(url).query)
-        self.assertEqual(urlsplit(url).hostname, 'bot.example.com')
-        self.assertEqual(urlsplit(url).path, '/oauth/vk/start')
-        self.assertEqual(set(params), {'state'})
-        self.assertLess(len(url), 255)
-        link_button = next(item for row in self.client.sent[-1]['keyboard']['buttons']
-                           for item in row if item['action']['type'] == 'open_link')
-        self.assertNotIn('color', link_button)
-        self.assertEqual(self.app.oauth.import_session(params['state'][0], 'pending')['actor'], 99)
-        self.assertEqual(self.store.projects(99), [])
+        await self.click('Мои проекты', user=99)
+        await self.click('Добавить проект', user=99)
+        await self.send('Проект участника', user=99)
+        self.assertEqual(self.store.project(99)['owner'], 99)
+        self.assertEqual(self.store.projects(42), [])
 
     async def test_change_group_resolves_short_name_and_rejects_profile(self):
         project = await self.setup_project()

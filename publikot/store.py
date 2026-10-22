@@ -10,7 +10,10 @@ class Conflict(Exception):
     pass
 
 
-class Store:
+from .platform_store import PlatformStore
+
+
+class Store(PlatformStore):
     def __init__(self, path: Path):
         path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.db = sqlite3.connect(path, isolation_level=None)
@@ -93,6 +96,12 @@ class Store:
             if field not in columns:
                 default = template.replace("'", "''")
                 self.db.execute(f"ALTER TABLE projects ADD COLUMN {field} TEXT NOT NULL DEFAULT '{default}'")
+        # Existing projects keep their API connection until explicitly switched.
+        for table in ('projects', 'jobs'):
+            target_columns = {r['name'] for r in self.db.execute(f'PRAGMA table_info({table})')}
+            for name, default in (('publish_mode', 'vk_api'), ('browser_target', '')):
+                if name not in target_columns:
+                    self.db.execute(f"ALTER TABLE {table} ADD COLUMN {name} TEXT NOT NULL DEFAULT '{default}'")
         version_columns = {r['name'] for r in self.db.execute('PRAGMA table_info(versions)')}
         if 'image_path' not in version_columns:
             self.db.execute('ALTER TABLE versions ADD COLUMN image_path TEXT')
@@ -117,10 +126,13 @@ class Store:
             if not self.db.execute("SELECT 1 FROM schema_meta WHERE name='project_members_backfilled'").fetchone():
                 self.db.execute("INSERT OR IGNORE INTO project_members(project_id,user_id,role) SELECT id,owner,'member' FROM projects")
                 self.db.execute("INSERT INTO schema_meta VALUES ('project_members_backfilled')")
+        self.init_platforms()
         # Не повторяем внешние операции с неизвестным результатом после перезапуска.
         self.db.execute("UPDATE jobs SET status='unknown' WHERE status='publishing'")
         self.db.execute("UPDATE jobs SET status='failed' WHERE status='generating'")
         self.db.execute("UPDATE inbox SET status='failed' WHERE status='processing'")
+        # A queued Postmypost record is recoverable by read-only status checks.
+        self.db.execute("UPDATE jobs SET status='publishing' WHERE id IN (SELECT job_id FROM deliveries WHERE status='queued')")
 
     def begin_event(self, event_id):
         return self.db.execute("INSERT OR IGNORE INTO inbox VALUES (?,'processing')", (event_id,)).rowcount == 1
@@ -209,7 +221,10 @@ class Store:
                     self.db.execute(f'DELETE FROM {table} WHERE project_id=?', (project_id,))
             self.db.execute('DELETE FROM approvals WHERE job_id IN (SELECT id FROM jobs WHERE project_id=?)', (project_id,))
             self.db.execute('DELETE FROM versions WHERE job_id IN (SELECT id FROM jobs WHERE project_id=?)', (project_id,))
+            self.db.execute('DELETE FROM deliveries WHERE job_id IN (SELECT id FROM jobs WHERE project_id=?)', (project_id,))
             self.db.execute('DELETE FROM jobs WHERE project_id=?', (project_id,))
+            self.db.execute('DELETE FROM project_destinations WHERE project_id=?', (project_id,))
+            self.db.execute('DELETE FROM platform_choices WHERE project_id=?', (project_id,))
             self.db.execute('DELETE FROM character_images WHERE character_id IN '
                             '(SELECT id FROM characters WHERE project_id=?)', (project_id,))
             for table in ('characters', 'project_references', 'project_materials', 'project_members'):
@@ -335,13 +350,25 @@ class Store:
         self.require(owner, project['id'])
         self.db.execute(f'UPDATE projects SET {field}=? WHERE id=?', (value, project['id']))
 
+    def browser_destination(self, actor, platform, target):
+        from .browser_publish import validate_target
+        target = validate_target(platform, target)
+        project = self.project(actor)
+        if actor != project['owner']:
+            raise Conflict('Площадку публикации настраивает владелец проекта.')
+        with self.transaction():
+            self.db.execute('UPDATE projects SET publish_mode=?,browser_target=? WHERE id=?',
+                            (platform + '_browser', target, project['id']))
+
     def create_job(self, owner, brief, image_path=None, project_id=None, reference_path=None):
         project = self.require(owner, project_id) if project_id is not None else self.project(owner)
         self.require(owner, project['id'])
         with self.transaction():
             ident = self.next_id('jobs')
             self.db.execute("INSERT INTO jobs(id,owner,project_id,brief,image_path,status,target_group) VALUES (?,?,?,?,?,'generating',?)", (ident, owner, project['id'], brief, image_path, project['vk_group']))
-            self.db.execute('UPDATE jobs SET reference_path=? WHERE id=?', (reference_path, ident))
+            self.db.execute('UPDATE jobs SET reference_path=?,publish_mode=?,browser_target=? WHERE id=?',
+                            (reference_path, project['publish_mode'], project['browser_target'], ident))
+            self.db.execute('UPDATE jobs SET destinations=? WHERE id=?', (self.destination_snapshot(owner, project['id']), ident))
             self.db.execute('UPDATE sessions SET job_id=? WHERE owner=? AND project_id=?', (ident, owner, project['id']))
         return ident, dict(project)
 
@@ -413,8 +440,21 @@ class Store:
             version = self.revision(owner, ident)
             if version['is_demo']:
                 raise Conflict('Демо-текст нельзя публиковать. Настройте ИИ и создайте новый пост.')
-            if not job['target_group']:
+            if job['publish_mode'] == 'vk_api' and not job['target_group']:
                 raise Conflict('Сообщество не задано. Настройте /vk НОМЕР и создайте новый пост.')
+            if job['publish_mode'] not in ('vk_api', 'platforms') and not job['browser_target']:
+                raise Conflict('Настройте площадку браузера и создайте новое задание.')
+            if job['publish_mode'] == 'platforms':
+                targets = json.loads(job['destinations'])
+                if not targets:
+                    raise Conflict('Подключите площадки и создайте новое задание.')
+                if job['destinations'] != self.destination_snapshot(owner, job['project_id']):
+                    raise Conflict('Площадки или токен изменились. Создайте новое задание.')
+                if self.require(owner, job['project_id'])['publish_mode'] != 'platforms':
+                    raise Conflict('Режим публикации изменился.')
+                for target in targets:
+                    self.db.execute('INSERT INTO deliveries(job_id,destination_id,target) VALUES (?,?,?)',
+                                    (ident, target['id'], json.dumps(target, ensure_ascii=False)))
             self.db.execute('INSERT INTO approvals(job_id,revision,owner) VALUES (?,?,?)', (ident, revision, owner))
             self.db.execute("UPDATE jobs SET status='publishing' WHERE id=?", (ident,))
         return job, dict(version)

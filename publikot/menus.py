@@ -4,6 +4,7 @@ import re
 from urllib.parse import urlsplit
 
 from .store import Conflict
+from .platform_menus import PlatformMenus, SCREENS as PLATFORM_SCREENS
 
 
 SHORT_PROMPT = 'Пиши короткий пост до 500 символов. Верни только готовый текст.'
@@ -52,14 +53,14 @@ def back(project=None):
     return [button('Назад', 'workspace', project=project) if project else button('Главное меню', 'home')]
 
 
-class BotMenus:
+class BotMenus(PlatformMenus):
     async def home(self, actor, peer):
         self.store.set_dialog(actor, None)
-        rows = [[button('Мои сообщества', 'communities')]]
+        rows = [[button('Мои проекты', 'communities')], [button('Мой Postmypost', 'pmp')]]
         if actor == self.settings.owner_id:
             rows.append([button('Управление доступом', 'admin')])
         rows.append([button('Помощь', 'help')])
-        await self.client.send(peer, 'Публикот. Выберите сообщество, чтобы подготовить короткий текст.'
+        await self.client.send(peer, 'Публикот. Выберите проект, чтобы подготовить короткий текст.'
                                + ('\nДемо-режим: настоящий ИИ пока не включён.' if self.settings.demo else ''),
                                keyboard=keyboard(*rows))
 
@@ -76,15 +77,10 @@ class BotMenus:
             nav.append(button('Далее', 'communities', page=page + 1))
         if nav:
             rows.append(nav)
-        footer = [button('Главное меню', 'home')]
-        if self.oauth and self.oauth.settings.oauth_enabled:
-            footer.insert(0, {'action': {'type': 'open_link', 'label': 'Добавить сообщество',
-                                         'link': self.oauth.begin_import(actor, short=True)}})
-        else:
-            footer.insert(0, button('Добавить сообщество', 'add'))
+        footer = [button('Добавить проект', 'create_project'), button('Главное меню', 'home')]
         rows.append(footer)
-        await self.client.send(peer, (f'Мои сообщества · {page + 1}/{pages}. Выберите сообщество.' if projects
-                                    else 'Сообществ пока нет. Нажмите «Добавить сообщество» или попросите администратора назначить проект.'),
+        await self.client.send(peer, (f'Мои проекты · {page + 1}/{pages}. Выберите проект.' if projects
+                                    else 'Проектов пока нет. Нажмите «Добавить проект» или попросите назначить вам проект.'),
                                keyboard=keyboard(*rows))
 
     async def workspace(self, actor, peer, project_id):
@@ -93,15 +89,22 @@ class BotMenus:
         rows = [[button('Написать текст', 'compose', project=project_id)],
                 [button('Мои задания', 'jobs', project=project_id)],
                 [button('Настройки проекта', 'settings', project=project_id)],
+                [button('Площадки', 'platforms', project=project_id), button('Участники', 'participants', project=project_id)],
                 [button('Назад', 'communities'), button('Главное меню', 'home')]]
-        await self.client.send(peer, f"{p['name']}\n" + (f"Сообщество: vk.ru/club{p['vk_group']}" if p['vk_group'] else
-                                                       'Сообщество ещё не указано.')
+        targets = self.store.destination_rows(actor, project_id)
+        await self.client.send(peer, f"{p['name']}\nПлощадок подключено: {len(targets)}."
                                + '\nВыберите действие.', keyboard=keyboard(*rows))
 
     async def prompt(self, actor, peer, state, text):
         self.store.set_dialog(actor, state)
         project_id, kind = state.get('project'), state['kind']
-        if kind == 'admin':
+        if kind == 'pmp_token':
+            previous = button('Назад', 'pmp')
+        elif kind in ('project_name', 'browser_name'):
+            previous = button('Назад', 'communities')
+        elif kind in ('participant_add', 'participant_remove'):
+            previous = button('Назад', 'participants', project=project_id)
+        elif kind == 'admin':
             previous = button('Назад', 'admin')
         elif kind in ('add_group', 'add_key'):
             previous = button('Назад', 'communities' if kind == 'add_group' else 'add')
@@ -121,16 +124,21 @@ class BotMenus:
         screen = payload['screen']
         previous_dialog = self.store.dialog(actor)
         self.store.set_dialog(actor, None)
+        if screen in PLATFORM_SCREENS:
+            return await self.platform_menu(actor, peer, payload, previous_dialog)
         if screen == 'home':
             return await self.home(actor, peer)
         if screen == 'help':
-            return await self.client.send(peer, '1. Нажмите «Добавить сообщество», разрешите доступ в VK и выберите сообщества.\n'
-                '2. Выберите его в «Мои сообщества».\n3. Нажмите «Написать текст» и отправьте задание.\n'
+            return await self.client.send(peer, '1. Создайте проект в «Мои проекты».\n'
+                '2. В «Площадках» подключите аккаунты через личный токен Postmypost или сеанс Дзена.\n3. Нажмите «Написать текст» и отправьте задание.\n'
                 '4. Готовый текст можно исправить по замечанию. Публикация требует отдельного подтверждения.\n'
                 'Назад отменяет ввод. Команда /menu всегда открывает главное меню.\n'
                 'Полный список команд: /help.', keyboard=keyboard(back()))
         if screen == 'communities':
             return await self.communities(actor, peer, int(payload.get('page', 0)))
+        if screen == 'add_browser':
+            return await self.prompt(actor, peer, {'kind': 'browser_name'},
+                                     'Введите название нового проекта для публикаций через браузер.')
         if screen == 'add':
             return await self.connect(actor, peer, None)
         if screen == 'admin':
@@ -139,7 +147,8 @@ class BotMenus:
             return await self.client.send(peer, 'Управление доступом к боту.', keyboard=keyboard(
                 [button('Разрешить доступ', 'admin_allow')],
                 [button('Запретить доступ', 'admin_deny')],
-                [button('Участники бота', 'admin_users')], back()))
+                [button('Участники бота', 'admin_users')],
+                [button('Назначить проект', 'admin_assign'), button('Снять назначение', 'admin_unassign')], back()))
         admin_commands = {'admin_users': '/users', 'admin_projects': '/allprojects',
                           'admin_allow': '/allow', 'admin_deny': '/deny', 'admin_assign': '/assign',
                           'admin_unassign': '/unassign', 'admin_members': '/members'}
@@ -172,9 +181,27 @@ class BotMenus:
         self.store.select(actor, project_id)
         if screen == 'workspace':
             return await self.workspace(actor, peer, project_id)
+        if screen == 'browser':
+            if actor != p['owner']:
+                raise Conflict('Площадку публикации настраивает владелец проекта.')
+            return await self.client.send(peer,
+                'Выберите площадку. Вход в аккаунт выполняется на компьютере с ботом. '
+                'После изменения площадки нужно создать новое задание.\n'
+                + ('Текущая: ' + p['browser_target'] if p['browser_target'] else 'Сейчас: API ВК.'),
+                keyboard=keyboard([button('ВК через браузер', 'browser_vk', project=project_id)],
+                                  [button('Дзен через браузер', 'browser_dzen', project=project_id)],
+                                  [button('Назад', 'settings', project=project_id)]))
+        if screen in ('browser_vk', 'browser_dzen'):
+            if actor != p['owner']:
+                raise Conflict('Площадку публикации настраивает владелец проекта.')
+            platform = screen.removeprefix('browser_')
+            return await self.prompt(actor, peer,
+                {'kind': 'browser_target', 'project': project_id, 'platform': platform},
+                'Отправьте HTTPS-ссылку на сообщество ВК.' if platform == 'vk' else
+                'Отправьте ссылку на редактор канала: https://dzen.ru/profile/editor/id/ID_КАНАЛА')
         if screen == 'compose':
             return await self.prompt(actor, peer, {'kind': 'post', 'project': project_id},
-                f"Сообщество: {p['name']}. О чём написать?\nОтправьте тему и важные факты одним сообщением. "
+                f"Проект: {p['name']}. О чём написать?\nОтправьте тему и важные факты одним сообщением. "
                 'По умолчанию — короткий текст до 500 символов. Можно приложить одно фото-референс '
                 'и описать, что с ним сделать. Фото необязательно и не публикуется автоматически.')
         if screen in ('settings', 'materials'):
@@ -193,7 +220,8 @@ class BotMenus:
                     [field_button('text_template'), field_button('image_template')],
                     back(project_id)]
             if actor in (p['owner'], self.settings.owner_id):
-                rows.insert(-1, [button('Удалить проект', 'delete_project_confirm', project=project_id)])
+                rows.insert(-1, [button('Площадки', 'platforms', project=project_id),
+                                 button('Удалить проект', 'delete_project_confirm', project=project_id)])
             return await self.client.send(peer, f"Настройки проекта: {p['name']}\nВыберите раздел.", keyboard=keyboard(*rows))
         if screen in ('field', 'field_add'):
             field = payload['field']
@@ -243,12 +271,12 @@ class BotMenus:
             if nav:
                 rows.append(nav)
             rows.append(back(project_id))
-            return await self.client.send(peer, 'Последние задания.' if jobs else 'Заданий пока нет. Нажмите «Написать текст» в меню сообщества.',
+            return await self.client.send(peer, 'Последние задания.' if jobs else 'Заданий пока нет. Нажмите «Написать текст» в меню проекта.',
                                           keyboard=keyboard(*rows))
         if screen == 'job':
             job = self.store.job(actor, int(payload['job']))
             if job['project_id'] != project_id:
-                raise Conflict('Задание относится к другому сообществу.')
+                raise Conflict('Задание относится к другому проекту.')
             self.store.select_job(actor, job['id'])
             await self.client.send(peer, f"Задание №{job['id']}: {self.job_label(job['status'])}"
                                    + ('\n' + job['remote_url'] if job['remote_url'] else ''))
@@ -258,7 +286,7 @@ class BotMenus:
         if screen == 'prompts':
             job = self.store.job(actor, int(payload['job']))
             if job['project_id'] != project_id:
-                raise Conflict('Задание относится к другому сообществу.')
+                raise Conflict('Задание относится к другому проекту.')
             self.store.select_job(actor, job['id'])
             version = self.store.revision(actor, job['id'])
             if not version or not version['text_prompt']:
@@ -296,7 +324,7 @@ class BotMenus:
     @staticmethod
     def job_label(status):
         return {'generating': 'готовится', 'review': 'черновик', 'publishing': 'публикуется',
-                'published': 'опубликовано', 'failed': 'ошибка', 'unknown': 'проверьте стену',
+                'published': 'опубликовано', 'failed': 'ошибка', 'unknown': 'проверьте площадку',
                 'cancelled': 'отменено'}.get(status, status)
 
     async def group_id(self, text):
@@ -324,6 +352,8 @@ class BotMenus:
         if not state:
             return False
         kind = state['kind']
+        if await self.platform_input(actor, peer, text, state):
+            return True
         if kind in ('add_name', 'add_group', 'add_key'):
             self.store.set_dialog(actor, None)
             await self.connect(actor, peer, None)
@@ -335,7 +365,20 @@ class BotMenus:
             self.store.require(actor, project_id)
             if kind not in ('revise', 'image'):
                 self.store.select(actor, project_id)
-        if kind == 'group':
+        if kind == 'browser_name':
+            if not text or len(text) > 100:
+                raise Conflict('Введите название от 1 до 100 символов.')
+            project_id = self.store.create_project(actor, text)
+            self.store.set_dialog(actor, None)
+            await self.menu(actor, peer, {'screen': 'browser', 'project': project_id})
+        elif kind == 'browser_target':
+            self.store.browser_destination(actor, state['platform'], text)
+            self.store.set_dialog(actor, None)
+            await self.client.send(peer,
+                'Площадка сохранена. Для входа на компьютере с ботом следуйте docs/browser-publishing.md. '
+                'После входа можно создавать задания и подтверждать публикацию.',
+                keyboard=keyboard([button('Написать текст', 'compose', project=project_id)], back(project_id)))
+        elif kind == 'group':
             group = await self.group_id(text)
             self.store.configure(actor, 'vk_group', group)
             self.store.set_dialog(actor, None)

@@ -1,0 +1,4 @@
+-r requirements.lock
+playwright==1.55.0
+pyee==13.0.0
+greenlet==3.2.4

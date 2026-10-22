@@ -314,3 +314,73 @@ class TelegramWorkflowTests(unittest.IsolatedAsyncioTestCase):
             await self.client.delete_messages(42, [10, 11])
         self.assertEqual(self.client.tracked_messages(42), [10, 11])
         self.assertEqual(self.client._call.await_count, 1)
+
+    async def click_platform_button(self, label, actor=42):
+        for method, options in reversed(self.session.calls):
+            payload = options['json']
+            if method != 'sendMessage' or str(payload.get('chat_id')) != str(actor):
+                continue
+            rows = payload.get('reply_markup', {}).get('inline_keyboard', [])
+            for row in rows:
+                for item in row:
+                    if item['text'].lstrip('✅❌⬅️☰➕ ') == label:
+                        self.number += 1
+                        await self.bot.handle_update({'update_id': self.number, 'callback_query': {
+                            'id': f'platform-{self.number}', 'from': {'id': actor},
+                            'message': {'message_id': self.number + 1000,
+                                        'from': {'is_bot': True, 'username': 'PubliKotBot'},
+                                        'chat': {'id': actor, 'type': 'private'}},
+                            'data': item['callback_data']}})
+                        return
+        self.fail('Missing Telegram button: ' + label)
+
+    async def test_projects_and_member_assignment_in_telegram(self):
+        await self.bot.handle_update(self.update('/start'))
+        await self.click_platform_button('Мои проекты')
+        await self.click_platform_button('Добавить проект')
+        await self.bot.handle_update(self.update('Общий бренд'))
+        project = self.store.project(42)
+        self.assertEqual(project['publish_mode'], 'platforms')
+        await self.bot.handle_update(self.update('/allow 99'))
+        await self.bot.handle_update(self.update('/select ' + str(project['id'])))
+        await self.click_platform_button('Участники')
+        await self.click_platform_button('Добавить участника')
+        prompt = next(options['json']['text'] for method, options in reversed(self.session.calls)
+                      if method == 'sendMessage')
+        self.assertIn('ID пользователя Telegram', prompt)
+        await self.bot.handle_update(self.update('99'))
+        await self.bot.handle_update(self.update('/projects', actor=99))
+        await self.click_platform_button('Общий бренд · №' + str(project['id']), actor=99)
+        self.assertEqual(self.store.project(99)['id'], project['id'])
+        self.assertEqual(self.store.require(99, project['id'])['name'], 'Общий бренд')
+
+    async def test_member_confirms_postmypost_publication_in_telegram_without_own_token(self):
+        from types import SimpleNamespace
+        token_owners = []
+        create = AsyncMock(return_value={'id': 900, 'publication_status': 5})
+        status = AsyncMock(return_value={'id': 900, 'publication_status': 1})
+        def pmp(token, session, **kwargs):
+            token_owners.append(kwargs['actor'])
+            return SimpleNamespace(projects=AsyncMock(return_value=[]), check_account=AsyncMock(),
+                                   create=create, status=status)
+        self.bot.platforms.pmp_factory = pmp
+        await self.bot.platforms.save_token(42, 'telegram-owner-private-token')
+        project = self.store.create_project(42, 'PMP бренд')
+        self.store.set_access(42, 99, True, 42)
+        self.store.set_member(42, project, 99, True, 42)
+        self.store.attach_destination(42, project, 'postmypost', 10, 20, 'vk', 'Сообщество бренда')
+        job, _ = self.store.create_job(42, 'Тема')
+        self.store.save_version(42, job, 1, 'Согласованный текст', False)
+        self.store.select_job(99, job)
+        await self.bot.handle_update(self.update('/status', actor=99))
+        await self.click_platform_button('Опубликовать', actor=99)
+        self.assertEqual(self.store.job(99, job)['status'], 'published')
+        create.assert_awaited_once()
+        self.assertEqual(create.call_args.args[0]['remote_account'], '20')
+        self.assertEqual(create.call_args.args[1], 'Согласованный текст')
+        self.assertTrue(token_owners and set(token_owners) == {42})
+        self.assertIsNone(self.store.credential_record(99, 'postmypost'))
+        # A stale confirmation from the same Telegram screen cannot create another post.
+        await self.click_platform_button('Опубликовать', actor=99)
+        create.assert_awaited_once()
+        self.assertNotIn('telegram-owner-private-token', str(self.session.calls))
