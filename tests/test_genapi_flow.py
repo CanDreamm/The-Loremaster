@@ -89,6 +89,7 @@ class GenAPIWholeStack(unittest.IsolatedAsyncioTestCase):
                     if route == '/storage':
                         self.assertNotIn('Authorization', request.headers)
                         form = await request.post()
+                        self.assertEqual(form['key'], 'signed-object-key')
                         uploaded.append(form['file'].file.read())
                         return web.Response(status=204)
                     if route.startswith('/pmp/'):
@@ -99,7 +100,7 @@ class GenAPIWholeStack(unittest.IsolatedAsyncioTestCase):
                             return web.json_response({'data': [{'id': 20, 'connection_status': 1}]})
                         if route == '/pmp/upload/init':
                             image_number += 1
-                            return web.json_response({'id': image_number, 'action': 'https://test.s3.amazonaws.com/', 'fields': []})
+                            return web.json_response({'id': image_number, 'action': 'https://test.s3.amazonaws.com/', 'fields': [{'key': 'key', 'value': 'signed-object-key'}]})
                         if route == '/pmp/upload/complete':
                             return web.json_response({'status': 1})
                         if route == '/pmp/upload/status':

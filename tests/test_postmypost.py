@@ -69,7 +69,7 @@ class PostmypostClientTests(unittest.IsolatedAsyncioTestCase):
             image.write_bytes(b'photo-bytes')
             self.session.request.side_effect = [response({
                 'id': 7, 'action': 'https://bucket.s3.amazonaws.com/',
-                'fields': [{'name': 'key', 'value': 'signed-key'}]}),
+                'fields': [{'key': 'key', 'value': 'signed-key'}]}),
                 response({'id': 7, 'status': 3}),
                 response({'id': 7, 'status': 3}),
                 response({'id': 7, 'file_id': 100, 'status': 1})]
@@ -100,7 +100,7 @@ class PostmypostClientTests(unittest.IsolatedAsyncioTestCase):
                 image.write_bytes(b'photo-bytes')
                 action = f'https://{host}/bucket?signature=private-signed-value'
                 self.session.request.side_effect = [response({'id': 7, 'action': action,
-                    'fields': [{'name': 'key', 'value': 'signed-key'}]}), response({'status': 1}),
+                    'fields': [{'key': 'key', 'value': 'signed-key'}]}), response({'status': 1}),
                     response({'status': 1, 'file_id': 100})]
                 self.session.post.return_value = response(status=204)
                 self.assertEqual(await self.client.upload(10, str(image)), 100)
@@ -129,6 +129,22 @@ class PostmypostClientTests(unittest.IsolatedAsyncioTestCase):
                     await resolver.resolve('storage.example', 443)
         finally:
             await resolver.close()
+
+    async def test_invalid_upload_fields_stop_before_file_or_publication_is_sent(self):
+        for fields in (None, {}, [{'name': 'key', 'value': 'legacy-wrong-field'}],
+                       [{'key': None, 'value': 'value'}], [{'key': 'key', 'value': None}],
+                       [{'key': 'bad\r\nname', 'value': 'value'}]):
+            with self.subTest(fields=fields), tempfile.TemporaryDirectory() as tmp:
+                image = Path(tmp) / 'photo.jpg'
+                image.write_bytes(b'photo')
+                self.session.request.reset_mock(side_effect=True)
+                self.session.post.reset_mock()
+                self.session.request.return_value = response({'id': 7,
+                    'action': 'https://storage.yandexcloud.net/bucket', 'fields': fields})
+                with self.assertRaisesRegex(ProviderError, 'неверные параметры загрузки. Файл не отправлен.'):
+                    await self.client.upload(10, str(image))
+                self.session.post.assert_not_called()
+                self.assertEqual(self.session.request.call_count, 1)
 
     async def test_photo_error_never_creates_text_only_publication(self):
         self.client.upload = AsyncMock(side_effect=ProviderError('Фото не готово'))

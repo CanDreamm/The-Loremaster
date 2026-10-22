@@ -107,11 +107,14 @@ class Postmypost:
         if not public_https_url(action):
             raise ProviderError('Postmypost: адрес хранилища не прошёл проверку HTTPS. Файл не отправлен.')
         fields = init.get('fields')
-        if not isinstance(fields, list) or any(not isinstance(f, dict) or set(('name','value')) - f.keys() for f in fields):
-            raise ProviderError('Postmypost: неверные параметры загрузки.')
+        if not isinstance(fields, list) or any(
+                not isinstance(f, dict) or not isinstance(f.get('key'), str) or not f['key']
+                or any(ord(c) < 32 or ord(c) == 127 for c in f['key'])
+                or not isinstance(f.get('value'), str) for f in fields):
+            raise ProviderError('Postmypost: неверные параметры загрузки. Файл не отправлен.')
         form = aiohttp.FormData()
         for field in fields:
-            form.add_field(str(field['name']), str(field['value']))
+            form.add_field(field['key'], field['value'])
         try:
             with image.open('rb') as handle:
                 form.add_field('file', handle, filename=image.name,

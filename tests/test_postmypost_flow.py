@@ -37,7 +37,9 @@ class PostmypostHTTPFlow(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(data['project_id'], 10)
                     self.assertEqual(data['size'], 11)
                     return web.json_response({'id': 7, 'action': 'https://storage.yandexcloud.net/pmp-bucket',
-                                              'fields': [{'name': 'key', 'value': 'upload-key'}]})
+                                              'fields': [{'key': 'key', 'value': 'upload-key'},
+                                                         {'key': 'policy', 'value': 'signed+/policy=='},
+                                                         {'key': 'x-amz-signature', 'value': 'signed-signature'}]})
                 if request.path == '/upload/complete':
                     self.assertEqual(request.query['id'], '7')
                     return web.json_response({'id': 7, 'status': 1})
@@ -57,6 +59,8 @@ class PostmypostHTTPFlow(unittest.IsolatedAsyncioTestCase):
                 self.assertNotIn('Authorization', request.headers)
                 fields = await request.post()
                 self.assertEqual(fields['key'], 'upload-key')
+                self.assertEqual(fields['policy'], 'signed+/policy==')
+                self.assertEqual(fields['x-amz-signature'], 'signed-signature')
                 self.assertEqual(fields['file'].file.read(), b'photo-bytes')
                 return web.Response(status=204)
             app = web.Application()

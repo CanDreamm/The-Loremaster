@@ -169,6 +169,17 @@ class ProjectsAndPlatformsTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(Conflict):
             self.store.restore_upload_draft(99, ident, 1)
 
+    async def test_existing_wrong_fields_error_can_restore_without_regeneration(self):
+        self.attach()
+        self.failures[1] = ProviderError('Postmypost: неверные параметры загрузки.')
+        ident = self.draft()
+        await self.platforms.publish(42, ident, 1)
+        self.assertTrue(self.store.can_restore_upload_failure(99, ident))
+        new = self.store.restore_upload_draft(99, ident, 1)
+        self.assertEqual(self.store.revision(99, new)['body'], 'Согласованный текст')
+        self.assertEqual(self.store.job(99, new)['status'], 'review')
+        self.assertEqual(self.store.db.execute('SELECT count(*) FROM ai_requests').fetchone()[0], 0)
+
     async def test_queued_status_is_read_after_restart_without_resend(self):
         self.attach()
         self.status_value = 5

@@ -516,7 +516,8 @@ class Store(PlatformStore):
         # the previous version's rejected storage URL. Never retry an ambiguous write.
         return bool(rows) and all(r['status'] == 'failed' and not r['remote_id']
             and json.loads(r['target'])['provider'] == 'postmypost'
-            and r['error'].endswith(('Файл не отправлен.', 'Пост не отправлен.')) for r in rows)
+            and (r['error'].endswith(('Файл не отправлен.', 'Пост не отправлен.'))
+                 or r['error'] == 'Postmypost: неверные параметры загрузки.') for r in rows)
 
     def restore_upload_draft(self, actor, ident, revision):
         with self.transaction():
