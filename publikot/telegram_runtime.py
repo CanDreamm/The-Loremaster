@@ -44,7 +44,7 @@ async def run_telegram(settings, args):
         client.vk_token = settings.bot_token
         await client.get_me()
         if args.check:
-            print('API сервиса доступен; подтверждён @publikot_bot. Webhook и фото требуют отдельной проверки.')
+            print('API сервиса доступен; подтверждён @PubliKotBot. Webhook и фото требуют отдельной проверки.')
             return
         store = Store(settings.database)
         runner = None
@@ -53,7 +53,7 @@ async def run_telegram(settings, args):
             bot = TelegramBot(settings, store, client, oauth=manager)
             if args.identify:
                 # No administrator is auto-enrolled. /id is available to everyone.
-                print('Отправьте /id в @publikot_bot после настройки webhook; затем задайте OWNER_TELEGRAM_ID и перезапустите службу.', flush=True)
+                print('Отправьте /id в @PubliKotBot после настройки webhook; затем задайте OWNER_TELEGRAM_ID и перезапустите службу.', flush=True)
             app = create_web_app(manager, notify=client.send) if manager else web.Application(client_max_size=1024*1024)
             add_webhook(app, TelegramInbox(store, bot), secret)
             runner = web.AppRunner(app, access_log=None)

@@ -27,7 +27,7 @@ class TelegramSettings:
         try:
             bot = str(UUID(bot))
         except ValueError:
-            raise ConfigError('Задайте CHATBOT_BOT_ID: UUID @publikot_bot из сервиса Chatbot.') from None
+            raise ConfigError('Задайте CHATBOT_BOT_ID: UUID @PubliKotBot из сервиса Chatbot.') from None
         return cls(key, bot)
 
 
@@ -59,8 +59,8 @@ class TelegramMessages:
 
     async def get_me(self):
         result = await self._call('getMe', {})
-        if not isinstance(result, dict) or result.get('username', '').lower() != 'publikot_bot':
-            raise ProviderError('В сервисе выбран другой бот: ожидается @publikot_bot.')
+        if not isinstance(result, dict) or result.get('username', '').lower() != 'publikotbot':
+            raise ProviderError('В сервисе выбран другой бот: ожидается @PubliKotBot.')
         return result
 
     async def send(self, chat_id, text, *, request_id):

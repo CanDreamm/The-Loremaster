@@ -9,7 +9,7 @@ from dotenv import dotenv_values, set_key
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Настройка @publikot_bot через Chatbot')
+    parser = argparse.ArgumentParser(description='Настройка @PubliKotBot через Chatbot')
     parser.add_argument('--show-webhook-url', action='store_true', help='Показать секретный URL для панели сервиса')
     args = parser.parse_args()
     config = Path(__file__).resolve().parent.parent / '.env.python'
@@ -30,7 +30,7 @@ def main():
     config.touch(mode=0o600, exist_ok=True)
     os.chmod(config, 0o600)
     entries = {'BOT_TRANSPORT': 'telegram', 'CHATBOT_API_KEY': api_key,
-               'CHATBOT_BOT_ID': '5409db73-f74b-4095-aaa4-a2341a4a87db',
+               'CHATBOT_BOT_ID': '691ae7a7-6786-4d3d-9a35-7a3689263984',
                'OWNER_TELEGRAM_ID': owner,
                'TELEGRAM_WEBHOOK_SECRET': values.get('TELEGRAM_WEBHOOK_SECRET') or secrets.token_urlsafe(32),
                'OAUTH_PUBLIC_URL': values.get('OAUTH_PUBLIC_URL') or 'https://bot.itiscat.ru',

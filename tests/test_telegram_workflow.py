@@ -54,7 +54,7 @@ class TelegramWorkflowTests(unittest.IsolatedAsyncioTestCase):
         self.settings = Settings('', 1, 42, Path(self.tmp.name), transport='telegram')
         self.store = Store(self.settings.database)
         self.session = Session()
-        self.client = TelegramWorkflowMessages(TelegramSettings('secret', '5409db73-f74b-4095-aaa4-a2341a4a87db'), self.session)
+        self.client = TelegramWorkflowMessages(TelegramSettings('secret', '691ae7a7-6786-4d3d-9a35-7a3689263984'), self.session)
         self.bot = TelegramBot(self.settings, self.store, self.client)
         self.number = 0
 
@@ -206,3 +206,9 @@ class TelegramWorkflowTests(unittest.IsolatedAsyncioTestCase):
         publisher.publish.assert_awaited_once()
         self.assertTrue(publisher.publish.call_args.args[-1].startswith('telegram-'))
         self.assertEqual(self.store.db.execute('SELECT status FROM jobs').fetchone()[0], 'published')
+
+    async def test_commands_addressed_to_current_bot(self):
+        await self.bot.handle_update(self.update('/new@publikot_bot Старый'))
+        self.assertEqual(self.store.db.execute('SELECT count(*) FROM projects').fetchone()[0], 0)
+        await self.bot.handle_update(self.update('/new@PubliKotBot Новый'))
+        self.assertEqual(self.store.project(42)['name'], 'Новый')

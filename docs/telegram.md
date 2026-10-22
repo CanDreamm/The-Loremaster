@@ -1,6 +1,6 @@
-# @publikot_bot через Chatbot и webhook
+# @PubliKotBot через Chatbot и webhook
 
-UUID бота: `5409db73-f74b-4095-aaa4-a2341a4a87db`.
+UUID бота: `691ae7a7-6786-4d3d-9a35-7a3689263984`.
 API: `https://chatbot.hopop.ru/api/v1`. Токен BotFather не используется;
 все Telegram-методы вызываются через сервис. Входящие события — стандартный Telegram Update.
 
@@ -52,7 +52,7 @@ https://bot.itiscat.ru. OAuth callback остаётся `https://bot.itiscat.ru/
 ```
 
 Этот режим слушает webhook, пока вы не остановите процесс. Настройте nginx
-и webhook по следующим разделам, отправьте `/id` в @publikot_bot.
+и webhook по следующим разделам, отправьте `/id` в @PubliKotBot.
 Ответ покажет ваш ID; доступ администратора автоматически не выдаётся.
 Остановите процесс, снова выполните configure-telegram.py и сохраните ID.
 Затем запускайте обычный `python -m publikot` или существующую службу publikot.
@@ -81,7 +81,7 @@ location /telegram/webhook/ {
 
 ## 3. Настройки сервиса
 
-Выберите @publikot_bot, активируйте его, выпустите API-ключ и разрешите внешний
+Выберите @PubliKotBot, активируйте его, выпустите API-ключ и разрешите внешний
 IP сервера. Включите методы `getMe`, `sendMessage`, `answerCallbackQuery`.
 Для фото также нужны `getFile`, `sendPhoto` и поддержка multipart при загрузке.
 
@@ -127,4 +127,4 @@ TELEGRAM_VK_ACCESS_TOKEN_USER_123. VK_BOT_TOKEN необязателен: в Tel
 
 Локальные тесты проверяют webhook, меню, события, доступ и защиту от повторных
 публикаций. Проверка реального сервиса, nginx, файлов и прав API требует запуска
-на сервере с ключом; `--check` проверяет только getMe и username @publikot_bot.
+на сервере с ключом; `--check` проверяет только getMe и username @PubliKotBot.

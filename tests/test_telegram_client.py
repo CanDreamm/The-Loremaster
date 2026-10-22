@@ -53,8 +53,8 @@ class TelegramClientTests(unittest.IsolatedAsyncioTestCase):
             await client.get_me()
 
     async def test_expected_bot(self):
-        client, _ = self.client({'ok': True, 'result': {'username': 'publikot_bot'}})
-        self.assertEqual((await client.get_me())['username'], 'publikot_bot')
+        client, _ = self.client({'ok': True, 'result': {'username': 'PubliKotBot'}})
+        self.assertEqual((await client.get_me())['username'], 'PubliKotBot')
 
     async def test_error_does_not_expose_response_or_retry(self):
         client, session = self.client({'ok': False, 'description': 'secret-key'})

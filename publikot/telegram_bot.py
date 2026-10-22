@@ -29,7 +29,7 @@ class TelegramBot(VkBot):
             command, space, args = text.partition(' ')
             if command.startswith('/') and '@' in command:
                 command, username = command.split('@', 1)
-                if username.lower() != 'publikot_bot':
+                if username.lower() != 'publikotbot':
                     return
                 text = command + space + args
             # This is an internal workflow event, never a VK API call.
