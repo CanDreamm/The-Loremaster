@@ -7,7 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
-from publikot.genapi import GenAPI, image_uri
+from publikot.genapi import GenAPI, image_uri, extract_text
 from publikot.media import version_images
 from publikot.providers import ProviderError
 from publikot.settings import Settings
@@ -191,6 +191,57 @@ class GenAPITests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn('Другой характер', version['text_prompt'])
         self.assertEqual(json.loads(self.store.job(42)['generation_context'])['project']['image_count'], 0)
         self.assertEqual(sum(c.args[0] == 'POST' for c in self.session.request.call_args_list), 1)
+
+    async def test_nested_and_full_responses_produce_text(self):
+        cases = [
+            {'result': [{'choices': [{'message': {'role': 'assistant', 'content': 'Готовый текст'}}]}]},
+            {'result': [{'message': {'content': [{'type': 'text', 'text': 'Готовый текст'}]}}]},
+            {'result': [], 'full_response': [{'choices': [{'message': {'content': 'Готовый текст'}}]}]},
+            {'result': None, 'full_response': {'output': [{'type': 'reasoning', 'text': 'Скрытые мысли'},
+                {'role': 'assistant', 'content': [{'type': 'output_text', 'text': 'Готовый текст'}]}]}},
+            {'result': {'output_text': 'Готовый текст'}},
+        ]
+        for index, case in enumerate(cases):
+            with self.subTest(index=index):
+                self.session.request.side_effect = [response({'request_id': 200 + index}),
+                    response({'status': 'success', **case})]
+                result = await self.ai.generate('', '', request_key=(42, self.job, index + 2))
+                self.assertEqual(result, 'Готовый текст')
+                self.assertEqual(await self.ai.generate('', '', request_key=(42, self.job, index + 2)), result)
+
+    async def test_old_empty_success_cache_is_refetched_by_get_only(self):
+        self.store.db.execute('INSERT INTO ai_requests(job_id,revision,kind,slot,model,status,request_id,result) '
+            "VALUES (?,1,'text',0,'gpt-6-luna','success','300',?)", (self.job, json.dumps({'result': [{}]})))
+        self.session.request.return_value = response({'status': 'success', 'result': [],
+            'full_response': [{'choices': [{'message': {'content': 'Сохранённая статья'}}]}]})
+        self.assertEqual(await self.text(), 'Сохранённая статья')
+        self.assertEqual(await self.text(), 'Сохранённая статья')
+        self.assertEqual(self.session.request.call_count, 1)
+        self.assertEqual(self.session.request.call_args.args,
+                         ('GET', 'https://api.gen-api.ru/api/v1/request/get/300'))
+
+    def test_parser_never_uses_reasoning_input_tools_or_alternative_choices(self):
+        self.assertEqual(extract_text([{'role': 'user', 'content': 'Не публиковать'},
+            {'type': 'reasoning', 'text': 'Не публиковать'},
+            {'type': 'function_call', 'text': 'Не публиковать'},
+            {'type': 'function_call_output', 'output': 'Не публиковать'},
+            {'type': 'input_text', 'text': 'Не публиковать'},
+            {'role': 'assistant', 'content': [{'type': 'text', 'text': 'Публикация'}]}]), 'Публикация')
+        self.assertEqual(extract_text({'parameters': {'messages': [{'content': 'Секрет'}]},
+            'usage': {'text': 'Секрет'}}), '')
+        self.assertEqual(extract_text({'choices': [{'message': {'content': 'Первый'}},
+            {'message': {'content': 'Другой вариант'}}]}), 'Первый')
+
+    async def test_empty_and_oversized_text_have_distinct_errors(self):
+        self.session.request.side_effect = [response({'request_id': 301}),
+            response({'status': 'success', 'result': ['']})]
+        with self.assertRaisesRegex(ProviderError, 'нет готового текста') as error:
+            await self.text()
+        self.assertNotIn('30000', str(error.exception))
+        self.session.request.side_effect = [response({'request_id': 302}),
+            response({'status': 'success', 'result': ['я' * 30001]})]
+        with self.assertRaisesRegex(ProviderError, '30001 символов'):
+            await self.ai.generate('', '', request_key=(42, self.job, 2))
 
     async def test_truncated_text_is_not_accepted_for_publication(self):
         self.session.request.side_effect = [response({'request_id': 105}), response({

@@ -1,5 +1,6 @@
 """Full bot -> GenAPI queue/media -> approval -> PMP upload and direct Dzen, over local HTTP."""
 import json
+import base64
 import tempfile
 import unittest
 from dataclasses import replace
@@ -54,19 +55,33 @@ class GenAPIWholeStack(unittest.IsolatedAsyncioTestCase):
                             if route.endswith('/gpt-6-luna'):
                                 self.assertIn('Характер кота', data['messages'][0]['content'])
                                 self.assertIn('Статья 6000 знаков', data['messages'][0]['content'])
+                                self.assertIn('Тёплый разговорный тон', data['messages'][0]['content'])
+                                self.assertIn('Материал character', data['messages'][0]['content'])
                                 self.assertEqual(len([c for c in data['messages'][1]['content'] if c['type'] == 'image_url']), 2)
+                                for block in data['messages'][1]['content']:
+                                    if block['type'] == 'image_url':
+                                        self.assertEqual(base64.b64decode(block['image_url']['url'].split(',', 1)[1]), PNG)
                                 tasks[ident] = [ARTICLE]
                             else:
                                 self.assertIn('Палитра: оранжевая', data['prompt'])
                                 self.assertIn('не рисуй надписей', data['prompt'])
                                 self.assertIn(ARTICLE, data['prompt'])
                                 self.assertEqual(len(data['image_urls']), 3 if 'Замечания' in data['prompt'] else 2)
+                                self.assertEqual((data['num_images'], data['max_images']), (1, 1))
+                                self.assertEqual((data['width'], data['height']), (1024, 1024))
+                                for uri in data['image_urls']:
+                                    self.assertEqual(base64.b64decode(uri.split(',', 1)[1]), PNG)
                                 tasks[ident] = [f'https://cdn.example/{ident}.png']
                             return web.json_response({'request_id': ident, 'status': 'processing'})
                         ident = int(route.rsplit('/', 1)[-1])
                         if fail_next_poll and ident > 1:
                             fail_next_poll = False
                             return web.json_response({}, status=503)
+                        if ident == 1:
+                            # A nested assistant answer reproduces the previously lost text.
+                            return web.json_response({'status': 'success', 'result': [{}], 'cost': 1,
+                                'full_response': [{'choices': [{'message': {'role': 'assistant',
+                                    'content': [{'type': 'output_text', 'text': ARTICLE}]}, 'finish_reason': 'stop'}]}]})
                         return web.json_response({'status': 'success', 'result': tasks[ident], 'cost': 1})
                     if route.startswith('/media/'):
                         self.assertNotIn('Authorization', request.headers)
@@ -141,6 +156,7 @@ class GenAPIWholeStack(unittest.IsolatedAsyncioTestCase):
                         await bot.command(42, 42, '/allow', '99', {})
                         await bot.command(42, 42, '/assign', f'{project} 99', {})
                         store.configure(42, 'concept', 'Характер кота: добрый рассказчик')
+                        store.configure(42, 'tone', 'Тёплый разговорный тон')
                         store.configure(42, 'text_prompt', 'Статья 6000 знаков, от первого лица')
                         store.configure(42, 'image_prompt', 'Палитра: оранжевая; не рисуй надписей')
                         await bot.menu(42, 42, {'screen': 'image_count', 'project': project, 'count': 3})

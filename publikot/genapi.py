@@ -20,6 +20,36 @@ ROLES = {'style': 'Референс визуального стиля', 'charact
 FORMATS = {'square': (1024, 1024), 'landscape': (1536, 1024), 'portrait': (1024, 1536)}
 
 
+def extract_text(value):
+    """Read final assistant output only; never stringify payloads or echo input/reasoning."""
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, list):
+        return '\n'.join(filter(None, (extract_text(item) for item in value)))
+    if not isinstance(value, dict):
+        return ''
+    if value.get('role', 'assistant') != 'assistant' or value.get('thought') is True:
+        return ''
+    if value.get('type') in ('reasoning', 'thinking', 'refusal', 'tool_call', 'function_call',
+                             'function_call_output', 'tool_result', 'input_text', 'input_image'):
+        return ''
+    # Multiple choices are alternatives, not consecutive paragraphs.
+    choices = value.get('choices')
+    if isinstance(choices, list):
+        return extract_text(choices[0]) if choices else ''
+    for field in ('message', 'output_text', 'output', 'content', 'text', 'response', 'result'):
+        candidate = value.get(field)
+        if isinstance(candidate, (str, list, dict)):
+            text = extract_text(candidate)
+            if text:
+                return text
+    return ''
+
+
+def text_result(response):
+    return extract_text(response.get('result')) or extract_text(response.get('full_response'))
+
+
 def truncated(value):
     if isinstance(value, dict):
         return value.get('finish_reason') in ('length', 'max_tokens') or any(truncated(v) for v in value.values())
@@ -45,6 +75,15 @@ def image_uri(path):
         return 'data:image/' + image_type(data) + ';base64,' + base64.b64encode(data).decode('ascii')
     except OSError:
         raise ProviderError('Не удалось прочитать референс проекта.') from None
+
+
+def build_text_payload(model, prompt, materials=()):
+    content = [{'type': 'text', 'text': 'Подготовь готовую публикацию по инструкциям. Верни только её текст.'}]
+    for material in materials:
+        content.extend([{'type': 'text', 'text': ROLES[material['role']]},
+                        {'type': 'image_url', 'image_url': {'url': image_uri(material['path'])}}])
+    return {'model': model, 'messages': [{'role': 'system', 'content': prompt},
+        {'role': 'user', 'content': content}], 'max_tokens': 10000, 'reasoning_effort': 'low'}
 
 
 class PublicResolver(DefaultResolver):
@@ -96,7 +135,10 @@ class GenAPI:
         key = (job, revision, kind, slot)
         row = self.store.db.execute('SELECT * FROM ai_requests WHERE job_id=? AND revision=? AND kind=? AND slot=?', key).fetchone()
         if row and row['status'] == 'success':
-            return json.loads(row['result'])
+            cached = json.loads(row['result'])
+            if kind != 'text' or text_result(cached):
+                return cached
+            # Old versions discarded full_response. Recover it by GET of the SAME ID.
         if row and not row['request_id']:
             raise ProviderError('GenAPI: ID предыдущего запроса не получен. Проверьте историю в кабинете. '
                                 'Повторная платная генерация автоматически не выполняется.')
@@ -123,12 +165,13 @@ class GenAPI:
                     self.store.db.execute("UPDATE ai_requests SET status='error' WHERE job_id=? AND revision=? AND kind=? AND slot=?", key)
                     raise ProviderError(f'GenAPI: генерация №{ident} завершилась с ошибкой. Подробности — в кабинете.')
                 if result.get('status') == 'success':
-                    if not isinstance(result.get('result'), list) or not result['result']:
+                    if kind != 'text' and (not isinstance(result.get('result'), list) or not result['result']):
                         raise ProviderError(f'GenAPI: запрос №{ident} вернул пустой результат.')
                     if truncated(result.get('full_response')):
                         self.store.db.execute("UPDATE ai_requests SET status='error' WHERE job_id=? AND revision=? AND kind=? AND slot=?", key)
                         raise ProviderError('GenAPI: ответ обрезан лимитом токенов. Сократите объём статьи; публикация остановлена.')
-                    saved = {'result': result['result'], 'cost': result.get('cost')}
+                    values = [text_result(result)] if kind == 'text' else result['result']
+                    saved = {'result': values, 'cost': result.get('cost')}
                     self.store.db.execute("UPDATE ai_requests SET status='success',result=? WHERE job_id=? AND revision=? AND kind=? AND slot=?", (json.dumps(saved), *key))
                     return saved
                 if result.get('status') != 'processing':
@@ -138,25 +181,15 @@ class GenAPI:
         raise ProviderError(f'GenAPI: запрос №{ident} ещё не готов. Проверьте результат кнопкой в боте; повторной оплаты запроса не будет.')
 
     async def generate(self, concept, brief, previous='', feedback='', *, prompt=None, materials=(), request_key):
-        content = [{'type': 'text', 'text': 'Подготовь готовую публикацию по инструкциям. Верни только её текст.'}]
-        for material in materials:
-            content.extend([{'type': 'text', 'text': ROLES[material['role']]},
-                            {'type': 'image_url', 'image_url': {'url': image_uri(material['path'])}}])
-        payload = {'model': self.settings.genapi_text_model, 'messages': [
-            {'role': 'system', 'content': prompt or concept + '\n' + brief},
-            {'role': 'user', 'content': content}], 'max_tokens': 10000, 'reasoning_effort': 'low'}
+        payload = build_text_payload(self.settings.genapi_text_model, prompt or concept + '\n' + brief, materials)
         result = await self.run(*request_key, 'text', 0, self.settings.genapi_text_model, payload)
-        texts = []
-        for item in result['result']:
-            if isinstance(item, str):
-                texts.append(item)
-            elif isinstance(item, dict):
-                message = item.get('message', item)
-                if isinstance(message, dict) and isinstance(message.get('content'), str):
-                    texts.append(message['content'])
-        body = '\n'.join(texts).strip()
-        if not body or len(body) > 30000:
-            raise ProviderError('GenAPI: пустой текст или более 30000 символов. Уточните объём задания.')
+        body = text_result(result)
+        if not body:
+            raise ProviderError('GenAPI: в ответе нет готового текста. Откройте /status и проверьте результат ИИ. '
+                                'Новый платный запрос не отправляется. Для диагностики: python -m publikot.genapi_check.')
+        if len(body) > 30000:
+            raise ProviderError(f'GenAPI: получено {len(body)} символов при лимите 30000. '
+                                'Сократите заданный объём публикации.')
         return body
 
     async def generate_image(self, actor, job, revision, slot, prompt, materials, image_format):
