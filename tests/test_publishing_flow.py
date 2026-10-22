@@ -111,8 +111,9 @@ class PublishingFlowTests(unittest.IsolatedAsyncioTestCase):
 
     async def connect_and_compose(self):
         await self.send('/start')
-        await self.click('Мои сообщества')
-        url = await self.click('Добавить сообщество')
+        await self.click('Мои проекты')
+        await self.send(payload={'action': 'menu', 'screen': 'add'})
+        url = await self.click('Выбрать сообщества ВК')
         start_url = urlsplit(url)
         response = await self.callback.get(start_url.path + '?' + start_url.query, allow_redirects=False)
         self.assertEqual(response.status, 302)
@@ -131,7 +132,7 @@ class PublishingFlowTests(unittest.IsolatedAsyncioTestCase):
         response = await self.callback.post('/oauth/vk/select', data={
             'state': params['state'][0], 'csrf': csrf, 'group': '123'}, headers=cookie)
         self.assertEqual(response.status, 200, await response.text())
-        await self.click('Мои сообщества')
+        await self.click('Мои проекты')
         await self.click(f"Кофейня · №{self.store.project(42)['id']}")
         await self.click('Написать текст')
         await self.send('Напиши короткий пост про кофе')
