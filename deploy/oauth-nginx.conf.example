@@ -5,6 +5,18 @@ server {
     ssl_certificate /etc/letsencrypt/live/bot.itiscat.ru/fullchain.pem;
     ssl_certificate_key /etc/letsencrypt/live/bot.itiscat.ru/privkey.pem;
 
+    location /telegram/webhook/ {
+        # URL содержит секрет: не сохранять его в журналах.
+        access_log off;
+        error_log /dev/null;
+        client_max_body_size 1m;
+        proxy_pass http://127.0.0.1:8081;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_connect_timeout 5s;
+        proxy_read_timeout 10s;
+    }
+
     location /oauth/vk/ {
         # Query содержит одноразовые code/state. Не журналировать запрос.
         access_log off;

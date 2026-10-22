@@ -367,7 +367,8 @@ class VkBot(BotMenus):
             raise Conflict('Нет действующего ключа публикации. Выполните /connect для выбранного проекта. Ключ сообщества бота не используется.')
         job, version = s.claim(actor, ident, revision)
         try:
-            url = await self.publisher_factory(token).publish(job['target_group'], version['body'], version['image_path'], ident)
+            publish_id = f'telegram-{ident}' if self.settings.transport == 'telegram' else ident
+            url = await self.publisher_factory(token).publish(job['target_group'], version['body'], version['image_path'], publish_id)
         except AmbiguousPublish:
             s.finish(actor, ident, 'unknown')
             raise

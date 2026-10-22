@@ -25,6 +25,7 @@ class Settings:
     oauth_public_url: str = ''
     oauth_provider: str = 'vkid'
     oauth_port: int = 8081
+    transport: str = 'vk'
 
     @property
     def oauth_enabled(self):
@@ -37,30 +38,35 @@ class Settings:
     @property
     def database(self):
         # Telegram и VK имеют разные пространства ID: базы нельзя смешивать.
-        return self.data_dir / 'publikot-vk.sqlite3'
+        return self.data_dir / ('publikot-telegram.sqlite3' if self.transport == 'telegram' else 'publikot-vk.sqlite3')
 
     def vk_token_for(self, user_id, project_id=None):
-        project_key = os.getenv(f'VK_ACCESS_TOKEN_PROJECT_{project_id}', '') if project_id is not None else ''
+        prefix = 'TELEGRAM_' if self.transport == 'telegram' else ''
+        project_key = os.getenv(f'{prefix}VK_ACCESS_TOKEN_PROJECT_{project_id}', '') if project_id is not None else ''
         if project_key:
             return project_key
         if user_id == self.owner_id:
             return self.vk_token
-        return os.getenv(f'VK_ACCESS_TOKEN_USER_{user_id}', '')
+        return os.getenv(f'{prefix}VK_ACCESS_TOKEN_USER_{user_id}', '')
 
     @classmethod
     def load(cls, require_owner=True):
         load_dotenv(Path(__file__).resolve().parent.parent / '.env.python', override=False)
+        transport = os.getenv('BOT_TRANSPORT', 'vk')
+        if transport not in ('vk', 'telegram'):
+            raise ConfigError('BOT_TRANSPORT: vk или telegram')
+        owner_name = 'OWNER_TELEGRAM_ID' if transport == 'telegram' else 'OWNER_VK_ID'
         token = os.getenv('VK_BOT_TOKEN', '')
         group = os.getenv('VK_BOT_GROUP_ID', '242305804')
-        owner = os.getenv('OWNER_VK_ID', '')
-        if not token:
+        owner = os.getenv(owner_name, '')
+        if not token and transport == 'vk':
             raise ConfigError('Задайте VK_BOT_TOKEN в .env.python')
         if not group.isdecimal() or int(group) <= 0:
             raise ConfigError('Задайте положительный VK_BOT_GROUP_ID')
         if owner and (not owner.isdecimal() or int(owner) <= 0):
-            raise ConfigError('OWNER_VK_ID должен быть положительным числовым ID ВК')
+            raise ConfigError(f'{owner_name} должен быть положительным числовым ID')
         if require_owner and not owner:
-            raise ConfigError('Задайте OWNER_VK_ID. Для определения ID: python -m publikot --identify')
+            raise ConfigError(f'Задайте {owner_name}. Для определения ID: python -m publikot --identify')
         client = os.getenv('VK_OAUTH_CLIENT_ID', '')
         public = os.getenv('OAUTH_PUBLIC_URL', '').rstrip('/')
         provider = os.getenv('VK_OAUTH_PROVIDER', 'vkid')
@@ -77,4 +83,4 @@ class Settings:
         return cls(token, int(group), int(owner or 0), Path(os.getenv('DATA_DIR', './data')).resolve(),
                    os.getenv('DEMO_MODE', 'true').lower() == 'true',
                    os.getenv('YANDEX_API_KEY', ''), os.getenv('YANDEX_FOLDER_ID', ''),
-                   os.getenv('VK_ACCESS_TOKEN', ''), client, secret, public, provider, int(port))
+                   os.getenv('TELEGRAM_VK_ACCESS_TOKEN' if transport == 'telegram' else 'VK_ACCESS_TOKEN', ''), client, secret, public, provider, int(port), transport)

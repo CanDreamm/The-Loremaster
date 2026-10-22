@@ -35,6 +35,9 @@ def event_failure(error):
 
 async def run(args):
     settings = Settings.load(require_owner=not (args.identify or args.check))
+    if settings.transport == 'telegram':
+        from .telegram_runtime import run_telegram
+        return await run_telegram(settings, args)
     async with aiohttp.ClientSession(trust_env=False) as session:
         client = VkMessages(settings.bot_token, settings.group_id, session)
         if not (args.identify or args.check):
@@ -114,9 +117,9 @@ async def run(args):
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Публикот — бот в сообщениях сообщества ВК')
-    parser.add_argument('--identify', action='store_true', help='Определить свой ID ВК через сообщение /id')
-    parser.add_argument('--check', action='store_true', help='Проверить ключ и доступ к Bots Long Poll')
+    parser = argparse.ArgumentParser(description='Публикот — интерфейс ВК или Telegram через сервис')
+    parser.add_argument('--identify', action='store_true', help='Определить свой ID через /id (для Telegram запускает webhook)')
+    parser.add_argument('--check', action='store_true', help='Проверить API выбранного транспорта')
     args = parser.parse_args()
     logging.basicConfig(level=logging.CRITICAL)
     try:
@@ -127,7 +130,7 @@ def main():
     except KeyboardInterrupt:
         return 0
     except Exception as error:
-        print(f'Запуск остановлен ({type(error).__name__}). Проверьте настройки ВК. Секреты не выводятся.', file=sys.stderr)
+        print(f'Запуск остановлен ({type(error).__name__}). Проверьте настройки бота. Секреты не выводятся.', file=sys.stderr)
         return 1
     return 0
 

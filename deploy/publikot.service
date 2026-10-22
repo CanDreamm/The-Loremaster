@@ -1,5 +1,5 @@
 [Unit]
-Description=Publikot VK community publishing assistant
+Description=Publikot publishing assistant (VK or Telegram)
 After=network-online.target
 Wants=network-online.target
 
