@@ -21,7 +21,10 @@ def response(data=None, status=200, error=None):
 class PostmypostClientTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.session = MagicMock()
-        self.client = Postmypost('private-pmp-token', self.session)
+        self.storage_factory = MagicMock()
+        self.storage_factory.return_value.__aenter__ = AsyncMock(return_value=self.session)
+        self.storage_factory.return_value.__aexit__ = AsyncMock(return_value=False)
+        self.client = Postmypost('private-pmp-token', self.session, upload_session_factory=self.storage_factory)
         self.target = {'remote_project': '10', 'remote_account': '20'}
 
     async def test_pagination_is_complete_and_uses_bearer(self):
@@ -87,6 +90,45 @@ class PostmypostClientTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(ProviderError):
                 await self.client.upload(10, str(image))
             self.session.post.assert_not_called()
+
+    async def test_upload_accepts_api_storage_hosts_without_cloud_vendor_pinning(self):
+        for host in ('storage.yandexcloud.net', 'postmypost.io', 'files.postmypost.ru', 'uploads.cdn.example'):
+            with self.subTest(host=host), tempfile.TemporaryDirectory() as tmp:
+                from publikot.postmypost import RequestBudget
+                self.client.budget = RequestBudget()
+                image = Path(tmp) / 'photo.png'
+                image.write_bytes(b'photo-bytes')
+                action = f'https://{host}/bucket?signature=private-signed-value'
+                self.session.request.side_effect = [response({'id': 7, 'action': action,
+                    'fields': [{'name': 'key', 'value': 'signed-key'}]}), response({'status': 1}),
+                    response({'status': 1, 'file_id': 100})]
+                self.session.post.return_value = response(status=204)
+                self.assertEqual(await self.client.upload(10, str(image)), 100)
+                self.assertEqual(self.session.post.call_args.args[0], action)
+                self.assertNotIn('headers', self.session.post.call_args.kwargs)
+                self.assertFalse(self.session.post.call_args.kwargs['allow_redirects'])
+                self.assertTrue(self.storage_factory.call_args.kwargs['trust_env'])
+                self.assertNotIn('headers', self.storage_factory.call_args.kwargs)
+
+    def test_storage_url_validation_keeps_https_and_private_network_guards(self):
+        from publikot.http_media import public_https_url
+        for value in (None, 1, [], '', 'http://storage.example/x', 'https://localhost/x',
+                      'https://127.0.0.1/x', 'https://169.254.169.254/x', 'https://[::1]/x',
+                      'https://[fc00::1]/x', 'https://host.local/x', 'https://host.internal/x',
+                      'https://user:secret@storage.example/x', 'https://storage.example:8443/x',
+                      'https://storage.example/x#secret', 'https://storage.example/\nsecret'):
+            with self.subTest(value=value):
+                self.assertFalse(public_https_url(value))
+
+    async def test_public_storage_name_cannot_resolve_to_private_address(self):
+        from publikot.http_media import PublicResolver
+        resolver = PublicResolver()
+        try:
+            with patch('publikot.http_media.DefaultResolver.resolve', AsyncMock(return_value=[{'host': '127.0.0.1'}])):
+                with self.assertRaises(OSError):
+                    await resolver.resolve('storage.example', 443)
+        finally:
+            await resolver.close()
 
     async def test_photo_error_never_creates_text_only_publication(self):
         self.client.upload = AsyncMock(side_effect=ProviderError('Фото не готово'))

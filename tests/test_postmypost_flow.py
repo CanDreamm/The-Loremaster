@@ -36,7 +36,7 @@ class PostmypostHTTPFlow(unittest.IsolatedAsyncioTestCase):
                     data = await request.json()
                     self.assertEqual(data['project_id'], 10)
                     self.assertEqual(data['size'], 11)
-                    return web.json_response({'id': 7, 'action': 'https://test.s3.amazonaws.com/',
+                    return web.json_response({'id': 7, 'action': 'https://storage.yandexcloud.net/pmp-bucket',
                                               'fields': [{'name': 'key', 'value': 'upload-key'}]})
                 if request.path == '/upload/complete':
                     self.assertEqual(request.query['id'], '7')
@@ -75,7 +75,7 @@ class PostmypostHTTPFlow(unittest.IsolatedAsyncioTestCase):
                 def request(self, *args, **kwargs):
                     return self.session.request(*args, **kwargs)
                 def post(self, url, **kwargs):
-                    assert url == 'https://test.s3.amazonaws.com/'
+                    assert url == 'https://storage.yandexcloud.net/pmp-bucket'
                     return self.session.post(server.make_url('/storage'), **kwargs)
             try:
                 with patch('publikot.postmypost.BASE', str(server.make_url('')).rstrip('/')), \

@@ -5,11 +5,11 @@ import time
 from collections import defaultdict, deque
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import urlsplit
 
 import aiohttp
 
 from .providers import AmbiguousPublish, ProviderError
+from .http_media import PublicResolver, public_https_url
 
 BASE = 'https://api.postmypost.io/v4.1'
 
@@ -36,9 +36,10 @@ class RequestBudget:
 
 
 class Postmypost:
-    def __init__(self, token, session, *, actor=0, budget=None):
+    def __init__(self, token, session, *, actor=0, budget=None, upload_session_factory=None):
         self.token, self.session, self.actor = token, session, actor
         self.budget = budget or RequestBudget()
+        self.upload_session_factory = upload_session_factory or aiohttp.ClientSession
 
     async def request(self, method, path, *, params=None, json=None):
         if not path.startswith('/') or '?' in path or '://' in path:
@@ -101,14 +102,10 @@ class Postmypost:
             'project_id': int(project), 'name': image.name, 'size': image.stat().st_size})
         ident = init.get('id')
         action = init.get('action', '')
-        try:
-            url = urlsplit(action)
-            safe = (url.scheme == 'https' and not url.username and not url.password and url.port in (None, 443)
-                    and url.hostname and (url.hostname.endswith('.amazonaws.com') or url.hostname.endswith('.postmypost.io')))
-        except ValueError:
-            safe = False
-        if not ident or not safe:
-            raise ProviderError('Postmypost: неверный адрес загрузки. Файл не отправлен.')
+        if type(ident) is not int or ident <= 0:
+            raise ProviderError('Postmypost: не получен ID загрузки. Файл не отправлен.')
+        if not public_https_url(action):
+            raise ProviderError('Postmypost: адрес хранилища не прошёл проверку HTTPS. Файл не отправлен.')
         fields = init.get('fields')
         if not isinstance(fields, list) or any(not isinstance(f, dict) or set(('name','value')) - f.keys() for f in fields):
             raise ProviderError('Postmypost: неверные параметры загрузки.')
@@ -119,11 +116,13 @@ class Postmypost:
             with image.open('rb') as handle:
                 form.add_field('file', handle, filename=image.name,
                                content_type=mimetypes.guess_type(image.name)[0] or 'application/octet-stream')
-                # No API Authorization header is ever sent to object storage.
-                async with self.session.post(action, data=form, allow_redirects=False,
-                                             timeout=aiohttp.ClientTimeout(total=120)) as response:
-                    if not 200 <= response.status < 300:
-                        raise ProviderError('Postmypost: фотография не загружена. Пост не отправлен.')
+                # A fresh session carries no API token, API cookies, or inherited auth headers.
+                async with self.upload_session_factory(trust_env=True, cookie_jar=aiohttp.DummyCookieJar(),
+                        connector=aiohttp.TCPConnector(resolver=PublicResolver())) as storage:
+                    async with storage.post(action, data=form, allow_redirects=False,
+                                            timeout=aiohttp.ClientTimeout(total=120)) as response:
+                        if not 200 <= response.status < 300:
+                            raise ProviderError('Postmypost: фотография не загружена. Пост не отправлен.')
         except (aiohttp.ClientError, TimeoutError, OSError):
             raise ProviderError('Postmypost: загрузка фотографии прервана. Пост не отправлен.') from None
         await self.request('POST', '/upload/complete', params={'id': ident})

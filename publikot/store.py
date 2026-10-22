@@ -137,6 +137,8 @@ class Store(PlatformStore):
                 self.db.execute(f"ALTER TABLE {table} ADD COLUMN image_paths TEXT NOT NULL DEFAULT '[]'")
         if 'generation_context' not in {r['name'] for r in self.db.execute('PRAGMA table_info(jobs)')}:
             self.db.execute("ALTER TABLE jobs ADD COLUMN generation_context TEXT NOT NULL DEFAULT ''")
+        if 'restored_job_id' not in {r['name'] for r in self.db.execute('PRAGMA table_info(jobs)')}:
+            self.db.execute('ALTER TABLE jobs ADD COLUMN restored_job_id INTEGER')
         self.db.execute('''CREATE TABLE IF NOT EXISTS ai_requests (
             job_id INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE, revision INTEGER NOT NULL,
             kind TEXT NOT NULL, slot INTEGER NOT NULL, model TEXT NOT NULL, status TEXT NOT NULL,
@@ -504,6 +506,40 @@ class Store(PlatformStore):
             self.db.execute('INSERT INTO approvals(job_id,revision,owner) VALUES (?,?,?)', (ident, revision, owner))
             self.db.execute("UPDATE jobs SET status='publishing' WHERE id=?", (ident,))
         return job, dict(version)
+
+    def can_restore_upload_failure(self, actor, ident):
+        job = self.job(actor, ident)
+        if job['status'] != 'failed' or job['publish_mode'] != 'platforms':
+            return False
+        rows = self.delivery_rows(actor, ident)
+        # These suffixes come only from our pre-publication upload checks, including
+        # the previous version's rejected storage URL. Never retry an ambiguous write.
+        return bool(rows) and all(r['status'] == 'failed' and not r['remote_id']
+            and json.loads(r['target'])['provider'] == 'postmypost'
+            and r['error'].endswith(('Файл не отправлен.', 'Пост не отправлен.')) for r in rows)
+
+    def restore_upload_draft(self, actor, ident, revision):
+        with self.transaction():
+            job = self.job(actor, ident)
+            if job['revision'] != revision or not self.can_restore_upload_failure(actor, ident):
+                raise Conflict('Восстановление доступно только после ошибки загрузки до отправки публикации.')
+            if job['restored_job_id']:
+                return self.job(actor, job['restored_job_id'])['id']
+            project = self.require(actor, job['project_id'])
+            if project['publish_mode'] != 'platforms' or job['destinations'] != self.destination_snapshot(actor, job['project_id']):
+                raise Conflict('Площадки или токены изменились. Восстановление для прежних получателей остановлено.')
+            old = dict(self.revision(actor, ident))
+            new = self.next_id('jobs')
+            fields = ('project_id', 'brief', 'image_path', 'target_group', 'reference_path',
+                      'publish_mode', 'browser_target', 'destinations', 'image_paths', 'generation_context')
+            self.db.execute('INSERT INTO jobs(id,owner,status,' + ','.join(fields) + ') VALUES (?, ?, \'review\','
+                            + ','.join('?' for _ in fields) + ')', (new, actor, *(job[f] for f in fields)))
+            fields = ('body', 'is_demo', 'image_path', 'text_prompt', 'image_prompt', 'prompt_materials', 'image_paths')
+            self.db.execute('INSERT INTO versions(job_id,revision,' + ','.join(fields) + ') VALUES (?,1,'
+                            + ','.join('?' for _ in fields) + ')', (new, *(old[f] for f in fields)))
+            self.db.execute('UPDATE jobs SET restored_job_id=? WHERE id=?', (new, ident))
+            self.select_job(actor, new)
+        return new
 
     def cancel(self, owner, ident, revision):
         job = self.job(owner, ident)

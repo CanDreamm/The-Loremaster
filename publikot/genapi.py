@@ -3,14 +3,13 @@ import asyncio
 import base64
 import ipaddress
 import json
-import os
 import re
 import uuid
 from pathlib import Path
 from urllib.parse import urlsplit
 
 import aiohttp
-from aiohttp.resolver import DefaultResolver
+from .http_media import PublicResolver
 
 from .providers import ProviderError
 
@@ -84,15 +83,6 @@ def build_text_payload(model, prompt, materials=()):
                         {'type': 'image_url', 'image_url': {'url': image_uri(material['path'])}}])
     return {'model': model, 'messages': [{'role': 'system', 'content': prompt},
         {'role': 'user', 'content': content}], 'max_tokens': 10000, 'reasoning_effort': 'low'}
-
-
-class PublicResolver(DefaultResolver):
-    async def resolve(self, host, port=0, family=0):
-        records = await super().resolve(host, port, family)
-        proxies = {urlsplit(os.getenv(name, '')).hostname for name in ('HTTPS_PROXY', 'https_proxy', 'HTTP_PROXY', 'http_proxy')}
-        if host not in proxies and any(not ipaddress.ip_address(r['host']).is_global for r in records):
-            raise OSError('Non-public media host')
-        return records
 
 
 class GenAPI:

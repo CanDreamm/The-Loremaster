@@ -115,6 +115,60 @@ class ProjectsAndPlatformsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.creates), 1)
         self.assertEqual(self.status_calls, [])
 
+    async def test_failed_upload_restores_same_text_and_three_images_without_ai_or_auto_publish(self):
+        from publikot.media import version_images
+        self.attach()
+        ident = self.draft()
+        self.store.replace_images(42, ident, 1, ['one.png', 'two.png', 'three.png'])
+        self.failures[1] = ProviderError('Postmypost: неверный адрес загрузки. Файл не отправлен.')
+        await self.platforms.publish(42, ident, 2)
+        self.assertTrue(self.store.can_restore_upload_failure(99, ident))
+        await self.bot.preview(99, 99, ident)
+        buttons = self.messages.send.call_args.kwargs['keyboard']['buttons']
+        self.assertIn('Восстановить черновик', [b['action']['label'] for row in buttons for b in row])
+        await self.bot.action(99, 99, {'action': 'restoredraft', 'job': ident, 'revision': 2})
+        new = self.store.job(99)
+        self.assertNotEqual(new['id'], ident)
+        self.assertEqual(new['status'], 'review')
+        self.assertEqual(self.store.revision(99, new['id'])['body'], 'Согласованный текст')
+        self.assertEqual(version_images(self.store.revision(99, new['id'])), ['one.png', 'two.png', 'three.png'])
+        self.assertEqual(self.store.restore_upload_draft(42, ident, 2), new['id'])
+        self.assertEqual(self.store.db.execute('SELECT count(*) FROM ai_requests').fetchone()[0], 0)
+        self.assertEqual(len(self.creates), 1)  # Still only the original failed attempt.
+        self.failures.clear()
+        await self.platforms.publish(99, new['id'], 1)
+        self.assertEqual(self.store.job(99, new['id'])['status'], 'published')
+        self.assertEqual(len(self.creates), 2)
+        with self.assertRaises(Conflict):
+            await self.platforms.publish(99, new['id'], 1)
+
+    async def test_restore_is_blocked_for_ambiguous_or_partially_published_delivery(self):
+        self.attach(account=1)
+        self.attach(account=2)
+        self.failures[2] = ProviderError('Postmypost: фотография не загружена. Пост не отправлен.')
+        ident = self.draft()
+        await self.platforms.publish(42, ident, 1)
+        self.assertFalse(self.store.can_restore_upload_failure(42, ident))
+        with self.assertRaises(Conflict):
+            self.store.restore_upload_draft(42, ident, 1)
+        self.failures[1] = AmbiguousPublish('Результат неизвестен')
+        ident = self.draft()
+        await self.platforms.publish(42, ident, 1)
+        self.assertFalse(self.store.can_restore_upload_failure(42, ident))
+
+    async def test_restore_checks_membership_tokens_and_stale_confirmation(self):
+        self.attach()
+        self.failures[1] = ProviderError('Postmypost: адрес хранилища не прошёл проверку HTTPS. Файл не отправлен.')
+        ident = self.draft()
+        await self.platforms.publish(42, ident, 1)
+        with self.assertRaises(Conflict):
+            self.store.restore_upload_draft(777, ident, 1)
+        with self.assertRaises(Conflict):
+            self.store.restore_upload_draft(99, ident, 2)
+        await self.platforms.save_token(42, 'replacement-private-token')
+        with self.assertRaises(Conflict):
+            self.store.restore_upload_draft(99, ident, 1)
+
     async def test_queued_status_is_read_after_restart_without_resend(self):
         self.attach()
         self.status_value = 5

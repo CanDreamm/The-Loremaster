@@ -219,7 +219,11 @@ class VkBot(BotMenus):
                                    keyboard=preview_keyboard(job, bool(version['is_demo'])))
         else:
             report = self.platforms.report(actor, ident) if job['publish_mode'] == 'platforms' else 'Выберите следующее действие.'
-            await self.client.send(peer, report, keyboard=keyboard(back(job['project_id'])))
+            rows = [back(job['project_id'])]
+            if self.store.can_restore_upload_failure(actor, ident):
+                rows.insert(0, [{'action': {'type': 'callback', 'label': 'Восстановить черновик',
+                    'payload': json.dumps({'action': 'restoredraft', 'job': ident, 'revision': job['revision']})}}])
+            await self.client.send(peer, report, keyboard=keyboard(*rows))
 
     async def command(self, actor, peer, command, args, message):
         s, admin = self.store, self.settings.owner_id
@@ -470,6 +474,11 @@ class VkBot(BotMenus):
             return await self.connect(actor, peer, int(payload['project']))
         action, ident, revision = payload['action'], int(payload['job']), int(payload['revision'])
         s = self.store
+        if action == 'restoredraft':
+            new = s.restore_upload_draft(actor, ident, revision)
+            await self.client.send(peer, 'Текст и изображения сохранены в восстановленном черновике. '
+                'ИИ повторно не вызывается. Проверьте и подтвердите публикацию.')
+            return await self.preview(actor, peer, new)
         if action == 'resume':
             job = s.job(actor, ident)
             if job['revision'] != revision or job['status'] != 'failed':
