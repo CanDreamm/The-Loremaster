@@ -12,6 +12,56 @@ from .providers import ProviderError
 from .settings import ConfigError
 
 
+def telegram_error_reason(body):
+    """Recognize error categories without exposing arbitrary upstream text."""
+    fragments = []
+    def collect(value, depth=0):
+        if depth > 4 or len(fragments) > 50:
+            return
+        if isinstance(value, str):
+            fragments.append(value[:1024].lower())
+        elif isinstance(value, dict):
+            for key in ('description', 'message', 'detail', 'details', 'error', 'errors', 'telegram_error', 'response', 'result', 'upstream', 'data', 'reason'):
+                if key in value:
+                    collect(value[key], depth+1)
+        elif isinstance(value, list):
+            for item in value[:20]:
+                collect(item, depth+1)
+    collect(body)
+    text = ' '.join(fragments)
+    for markers, reason in (
+        (("message to delete not found", "message not found", "message_id_invalid"), 'not_found'),
+        (("message can't be deleted", "message cannot be deleted", "message_delete_forbidden", "message is too old"), 'undeletable'),
+        (("chat not found",), 'chat_not_found'),
+        (("message identifier is not specified", "message_id is required", "message_id must"), 'invalid_message_id'),
+        (("method_not_supported", "unsupported method", "method is not supported"), 'unsupported_method'),
+        (("query is too old", "query id is invalid"), 'expired_callback'),
+    ):
+        if any(marker in text for marker in markers):
+            return reason
+    return 'unknown'
+
+
+class TelegramApiError(ProviderError):
+    def __init__(self, method, status, body=None):
+        self.status = status
+        code = body.get('error_code') if isinstance(body, dict) else None
+        self.code = code if type(code) is int else status
+        self.reason = telegram_error_reason(body)
+        detail = {
+            'not_found': 'Сообщение уже удалено или не найдено.',
+            'undeletable': 'Telegram не разрешает удалять это сообщение (возраст или права).',
+            'chat_not_found': 'Чат не найден: проверьте выбранного бота и получателя.',
+            'invalid_message_id': 'Сервис отклонил идентификатор сообщения.',
+            'unsupported_method': 'Сервис не поддерживает этот метод.',
+            'expired_callback': 'Время ответа на кнопку истекло.',
+        }.get(self.reason)
+        if not detail:
+            detail = ('Проверьте API-ключ, разрешённый IP и методы бота.' if self.code in (401, 403)
+                      else 'Сервис отклонил запрос; причина не распознана, проверьте журнал запросов сервиса.')
+        super().__init__(f'Сервис Telegram: {method} вернул HTTP {status} (код {self.code}). {detail}')
+
+
 @dataclass(frozen=True)
 class TelegramSettings:
     api_key: str = field(repr=False)
@@ -47,11 +97,14 @@ class TelegramMessages:
                                          timeout=aiohttp.ClientTimeout(total=35),
                                          allow_redirects=False) as response:
                 if response.status != 200:
-                    raise ProviderError(f'Сервис Telegram: {method} вернул HTTP {response.status}. '
-                                        'Проверьте API-ключ, разрешённый IP и методы бота.')
+                    try:
+                        error_body = await response.json()
+                    except (aiohttp.ClientError, ValueError):
+                        error_body = None
+                    raise TelegramApiError(method, response.status, error_body)
                 result = await response.json()
                 if not isinstance(result, dict) or result.get('ok') is not True or 'result' not in result:
-                    raise ProviderError('Сервис Telegram не подтвердил выполнение запроса.')
+                    raise TelegramApiError(method, response.status, result)
                 return result['result']
         except (aiohttp.ClientError, TimeoutError, ValueError):
             if method in ('getMe', 'getUpdates', 'deleteWebhook'):
@@ -114,14 +167,27 @@ class TelegramWorkflowMessages(TelegramMessages):
     async def delete_messages(self, peer, message_ids):
         # Only our recorded messages in this chat may be deleted.
         known = set(self.tracked_messages(peer))
-        for ident in dict.fromkeys(message_ids):
-            if type(ident) is not int or ident not in known:
-                continue
-            result = await self._call('deleteMessage', {'chat_id': str(peer), 'message_id': ident}, uuid4())
-            if result is not True:
-                raise ProviderError('Сервис не подтвердил удаление сообщения Telegram.')
+        first_error = None
+        # Recent screens first: an old undeletable message must not block them.
+        for ident in sorted({value for value in message_ids if type(value) is int and value in known}, reverse=True):
+            try:
+                result = await self._call('deleteMessage', {'chat_id': peer, 'message_id': ident}, uuid4())
+                if result is not True:
+                    raise ProviderError('Сервис не подтвердил удаление сообщения Telegram.')
+            except TelegramApiError as error:
+                if error.code == 400 and error.reason in ('not_found', 'undeletable'):
+                    # Retire only a confirmed, permanent per-message rejection.
+                    self.store.forget_bot_messages(0, peer, [ident])
+                    print(f'Пропущено сообщение Telegram: {error}', flush=True)
+                    continue
+                if error.code == 400:
+                    first_error = first_error or error
+                    continue
+                raise
             # Persist each success even if a later deletion fails.
             self.store.forget_bot_messages(0, peer, [ident])
+        if first_error:
+            raise first_error
 
     def callback_payload(self, actor, token):
         row = self.store.db.execute('SELECT payload FROM telegram_buttons WHERE token=? AND actor=?',

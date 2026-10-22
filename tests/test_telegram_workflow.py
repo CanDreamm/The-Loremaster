@@ -10,7 +10,7 @@ from publikot.providers import ProviderError
 from publikot.settings import Settings
 from publikot.store import Store
 from publikot.telegram_bot import TelegramBot
-from publikot.telegram_client import TelegramSettings, TelegramWorkflowMessages
+from publikot.telegram_client import TelegramSettings, TelegramWorkflowMessages, TelegramApiError
 from publikot.telegram_runtime import TelegramVkOAuthProvider
 from publikot.telegram_webhook import TelegramInbox
 
@@ -227,7 +227,7 @@ class TelegramWorkflowTests(unittest.IsolatedAsyncioTestCase):
         await self.bot.handle_update(callback)
         calls = self.session.calls[start:]
         self.assertEqual([method for method, _ in calls], ['answerCallbackQuery', 'sendMessage', 'deleteMessage'])
-        self.assertEqual(calls[-1][1]['json'], {'chat_id': '42', 'message_id': previous[0]})
+        self.assertEqual(calls[-1][1]['json'], {'chat_id': 42, 'message_id': previous[0]})
         self.assertTrue(self.client.tracked_messages(42))
         self.assertTrue(set(previous).isdisjoint(self.client.tracked_messages(42)))
         self.assertTrue(self.client.tracked_messages(99))
@@ -275,7 +275,7 @@ class TelegramWorkflowTests(unittest.IsolatedAsyncioTestCase):
         self.client._call = AsyncMock(side_effect=[True, ProviderError('HTTP 403')])
         with self.assertRaises(ProviderError):
             await self.client.delete_messages(42, [10, 11])
-        self.assertEqual(self.client.tracked_messages(42), [11])
+        self.assertEqual(self.client.tracked_messages(42), [10])
 
     async def test_existing_clicked_bot_menu_is_tracked_for_cleanup(self):
         token = self.client.markup(42, {'buttons': [[{'action': {'type': 'callback', 'label': 'Главная',
@@ -286,3 +286,31 @@ class TelegramWorkflowTests(unittest.IsolatedAsyncioTestCase):
         await self.bot.handle_update(callback)
         self.assertEqual(self.session.calls[-1][0], 'deleteMessage')
         self.assertEqual(self.session.calls[-1][1]['json']['message_id'], 9001)
+
+    async def test_one_permanently_undeletable_message_does_not_block_other_messages(self):
+        for ident in (10, 11, 12):
+            self.client.remember_message(42, ident)
+        self.client._call = AsyncMock(side_effect=[True,
+            TelegramApiError('deleteMessage', 400, {'description': "message can't be deleted"}), True])
+        with patch('builtins.print'):
+            await self.client.delete_messages(42, [10, 11, 12])
+        self.assertEqual([c.args[1]['message_id'] for c in self.client._call.call_args_list], [12, 11, 10])
+        self.assertEqual(self.client.tracked_messages(42), [])
+
+    async def test_unknown_400_is_retained_but_other_screens_are_still_deleted(self):
+        for ident in (10, 11, 12):
+            self.client.remember_message(42, ident)
+        self.client._call = AsyncMock(side_effect=[TelegramApiError('deleteMessage', 400, {}), True, True])
+        with self.assertRaises(TelegramApiError):
+            await self.client.delete_messages(42, [10, 11, 12])
+        self.assertEqual(self.client.tracked_messages(42), [12])
+        self.assertEqual(self.client._call.await_count, 3)
+
+    async def test_403_does_not_discard_messages_or_attempt_every_record(self):
+        for ident in (10, 11):
+            self.client.remember_message(42, ident)
+        self.client._call = AsyncMock(side_effect=TelegramApiError('deleteMessage', 403))
+        with self.assertRaises(TelegramApiError):
+            await self.client.delete_messages(42, [10, 11])
+        self.assertEqual(self.client.tracked_messages(42), [10, 11])
+        self.assertEqual(self.client._call.await_count, 1)

@@ -2,7 +2,7 @@ import unittest
 from uuid import uuid4
 
 from publikot.providers import ProviderError
-from publikot.telegram_client import TelegramMessages, TelegramSettings
+from publikot.telegram_client import TelegramMessages, TelegramSettings, TelegramApiError
 
 
 class Response:
@@ -24,10 +24,13 @@ class Response:
 class Session:
     def __init__(self, data):
         self.data, self.calls = data, []
+        self.status = 200
 
     def post(self, url, **options):
         self.calls.append((url, options))
-        return Response(self.data)
+        response = Response(self.data)
+        response.status = self.status
+        return response
 
 
 class TelegramClientTests(unittest.IsolatedAsyncioTestCase):
@@ -69,3 +72,32 @@ class TelegramClientTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(ProviderError):
                 await client.send(123, text, request_id=ident)
         self.assertEqual(session.calls, [])
+
+    async def test_http_400_explains_known_delete_error_without_exposing_response(self):
+        client, session = self.client({'ok': False, 'error_code': 400,
+                                      'error': {'description': 'Bad Request: message to delete not found'},
+                                      'debug': 'secret-key'})
+        session.status = 400
+        with self.assertRaises(TelegramApiError) as error:
+            await client._call('deleteMessage', {'chat_id': '42', 'message_id': 1})
+        self.assertEqual(error.exception.reason, 'not_found')
+        self.assertEqual(error.exception.code, 400)
+        self.assertIn('не найдено', str(error.exception))
+        self.assertNotIn('secret-key', str(error.exception))
+        self.assertNotIn('API-ключ', str(error.exception))
+
+    async def test_unknown_bad_request_is_not_misreported_as_credentials_error(self):
+        client, session = self.client({'description': 'secret-key some private request data'})
+        session.status = 400
+        with self.assertRaises(TelegramApiError) as error:
+            await client._call('deleteMessage', {})
+        self.assertEqual(error.exception.reason, 'unknown')
+        self.assertNotIn('secret-key', str(error.exception))
+        self.assertIn('причина не распознана', str(error.exception))
+
+    async def test_service_error_envelope_on_http_200_is_preserved(self):
+        client, _ = self.client({'ok': False, 'error_code': 400, 'description': "Bad Request: message can't be deleted"})
+        with self.assertRaises(TelegramApiError) as error:
+            await client._call('deleteMessage', {})
+        self.assertEqual(error.exception.code, 400)
+        self.assertEqual(error.exception.reason, 'undeletable')
