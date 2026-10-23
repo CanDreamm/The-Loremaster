@@ -53,9 +53,9 @@ class Settings:
         return os.getenv(f'{prefix}VK_ACCESS_TOKEN_USER_{user_id}', '')
 
     @classmethod
-    def load(cls, require_owner=True):
+    def load(cls, require_owner=True, *, transport=None):
         load_dotenv(Path(__file__).resolve().parent.parent / '.env.python', override=False)
-        transport = os.getenv('BOT_TRANSPORT', 'vk')
+        transport = transport or os.getenv('BOT_TRANSPORT', 'vk')
         if transport not in ('vk', 'telegram'):
             raise ConfigError('BOT_TRANSPORT: vk или telegram')
         owner_name = 'OWNER_TELEGRAM_ID' if transport == 'telegram' else 'OWNER_VK_ID'

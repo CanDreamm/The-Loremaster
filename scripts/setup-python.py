@@ -23,4 +23,5 @@ if owner and (not owner.isdecimal() or int(owner) <= 0):
 for name, value in [('VK_BOT_TOKEN', token), ('VK_BOT_GROUP_ID', group or current.get('VK_BOT_GROUP_ID') or '242305804'), ('OWNER_VK_ID', owner)]:
     if value:
         set_key(target, name, value)
+set_key(target, 'BOT_TRANSPORT', 'vk')
 print('Настройки ВК сохранены. Старые настройки не удалены; Telegram больше не используется.')
