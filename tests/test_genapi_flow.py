@@ -99,17 +99,15 @@ class GenAPIWholeStack(unittest.IsolatedAsyncioTestCase):
                                 for block in data['messages'][1]['content']:
                                     if block['type'] == 'image_url':
                                         self.assertEqual(base64.b64decode(block['image_url']['url'].split(',', 1)[1]), PNG)
-                                if data['messages'][0]['content'].startswith('Convert the original user task'):
-                                    self.assertNotIn(ARTICLE, data['messages'][0]['content'])
-                                    tasks[ident] = ['Палитра: оранжевая; не рисуй надписей. Кот в кофейне. '
-                                        + ('Замечания: Сделай светлее' if 'Замечания' in data['messages'][0]['content'] else '')]
-                                else:
-                                    tasks[ident] = [ARTICLE]
+                                self.assertEqual(ident, 1)  # Only the publication itself may call the LLM.
+                                tasks[ident] = [ARTICLE]
                             else:
                                 self.assertIn('Палитра: оранжевая', data['prompt'])
                                 self.assertIn('не рисуй надписей', data['prompt'])
                                 self.assertNotIn(ARTICLE, data['prompt'])
-                                self.assertLessEqual(len(data['prompt']), 2400)
+                                self.assertIn('ДЕТАЛЬ КОНЦЕПЦИИ ' * 300, data['prompt'])
+                                self.assertIn('Расскажи, как открылась кофейня', data['prompt'])
+                                self.assertIn('Материал character', data['prompt'])
                                 self.assertEqual(len(data['image_urls']), 2 if 'Замечания' in data['prompt'] else 1)
                                 self.assertEqual((data['num_images'], data['max_images']), (1, 1))
                                 self.assertEqual((data['width'], data['height']), (1024, 1024))
@@ -206,7 +204,8 @@ class GenAPIWholeStack(unittest.IsolatedAsyncioTestCase):
                         project = store.project(42)['id']
                         await bot.command(42, 42, '/allow', '99', {})
                         await bot.command(42, 42, '/assign', f'{project} 99', {})
-                        store.configure(42, 'concept', 'Характер кота: добрый рассказчик. Тёплый разговорный тон')
+                        store.configure(42, 'concept', 'Характер кота: добрый рассказчик. Тёплый разговорный тон. '
+                                        + 'ДЕТАЛЬ КОНЦЕПЦИИ ' * 300)
                         store.configure(42, 'text_prompt', 'Статья 6000 знаков, от первого лица')
                         store.configure(42, 'image_prompt', 'Палитра: оранжевая; не рисуй надписей')
                         await bot.menu(42, 42, {'screen': 'image_count', 'project': project, 'count': 3})

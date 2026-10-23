@@ -7,7 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
-from publikot.genapi import GenAPI, GenAPIRejected, IMAGE_PROMPT_BUDGET, image_uri, extract_text, validation_details
+from publikot.genapi import GenAPI, GenAPIRejected, image_uri, extract_text, validation_details
 from publikot.media import version_images
 from publikot.providers import ProviderError
 from publikot.settings import Settings
@@ -203,56 +203,41 @@ class GenAPITests(unittest.IsolatedAsyncioTestCase):
         await self.ai.generate_image(42, self.job, 1, 0, 'Сцена', [], 'square')
         self.assertNotIn('image_urls', self.session.request.call_args_list[0].kwargs['json'])
 
-    async def test_long_context_prepares_a_cached_scene_with_full_settings_and_reference(self):
-        prompt = 'Палитра: рыжая. Только один персонаж. Без надписей. Статья: ' + 'Абзац истории. ' * 600
-        scene = 'A single red cat in a warm cafe. Orange palette, no lettering.'
+    async def test_long_prompt_is_sent_verbatim_directly_to_image_model_without_a_text_request(self):
+        prompt = 'Задание: персонаж в кофейне. Концепция: ' + 'Важные детали концепции. ' * 600
         self.session.request.side_effect = [response({'request_id': 801}),
-            response({'status': 'success', 'result': [{}], 'full_response': {
-                'choices': [{'message': {'content': scene}}]}}),
-            response({'request_id': 802}),
             response({'status': 'success', 'result': ['https://cdn.example/image.png']})]
         self.session.get.return_value = response()
-        materials = [{'role': 'character', 'path': str(self.ref)}]
+        materials = []
         result = await self.ai.generate_image(42, self.job, 1, 0, prompt, materials, 'square')
         calls = self.session.request.call_args_list
-        self.assertEqual(len(calls), 4)
-        preparation = calls[0].kwargs['json']
-        self.assertIn(prompt, preparation['messages'][0]['content'])
-        self.assertIn('in English', preparation['messages'][0]['content'])
-        self.assertIn('latest correction', preparation['messages'][0]['content'])
-        self.assertEqual(preparation['messages'][1]['content'][2]['image_url']['url'], image_uri(self.ref))
-        self.assertEqual(self.store.db.execute("SELECT result FROM ai_requests WHERE kind='image_prompt_v2'").fetchone()[0],
-                         json.dumps({'result': [scene], 'cost': None}))
+        self.assertEqual(len(calls), 2)
+        self.assertTrue(calls[0].args[1].endswith('/seedream-v5-lite'))
+        self.assertEqual(calls[0].kwargs['json']['prompt'], prompt)
+        self.assertFalse(calls[0].kwargs['json']['translate_input'])
+        self.assertIsNone(self.store.db.execute("SELECT 1 FROM ai_requests WHERE kind!='image'").fetchone())
         metadata = json.loads(self.store.db.execute("SELECT request_meta FROM ai_requests WHERE kind='image'").fetchone()[0])
-        self.assertEqual(metadata['prompt_chars'], len(scene))
-        self.assertEqual(metadata['transport'], 'multipart/form-data')
+        self.assertEqual(metadata['prompt_chars'], len(prompt))
         self.assertEqual(await self.ai.generate_image(42, self.job, 1, 0, prompt, materials, 'square'), result)
-        self.assertEqual(self.session.request.call_count, 4)
+        self.assertEqual(self.session.request.call_count, 2)
 
-    async def test_preparation_poll_resumes_by_id_and_does_not_repeat_the_paid_text_request(self):
+    async def test_long_prompt_image_poll_resumes_by_id_without_any_text_request(self):
         prompt = 'Контекст: ' + 'История. ' * 600
         self.session.request.side_effect = [response({'request_id': 803}), response(status=503)]
         with self.assertRaises(ProviderError):
             await self.ai.generate_image(42, self.job, 1, 0, prompt, [], 'square')
-        self.session.request.side_effect = [response({'status': 'success', 'result': ['A cat in a cafe.']}),
-            response({'request_id': 804}), response({'status': 'success', 'result': ['https://cdn.example/image.png']})]
+        self.session.request.side_effect = [response({'status': 'success', 'result': ['https://cdn.example/image.png']})]
         self.session.get.return_value = response()
         await self.ai.generate_image(42, self.job, 1, 0, prompt, [], 'square')
         posts = [call for call in self.session.request.call_args_list if call.args[0] == 'POST']
-        self.assertEqual(len(posts), 2)
-        self.assertTrue(posts[0].args[1].endswith('/gpt-6-luna'))
-        self.assertTrue(posts[1].args[1].endswith('/seedream-v5-lite'))
+        self.assertEqual(len(posts), 1)
+        self.assertTrue(posts[0].args[1].endswith('/seedream-v5-lite'))
 
-    async def test_invalid_scene_output_never_submits_a_paid_image_request(self):
-        for scene in ('', 'x' * (IMAGE_PROMPT_BUDGET + 1)):
-            job, _ = self.store.create_job(42, 'Тема')
-            self.session.request.side_effect = [response({'request_id': 805}),
-                response({'status': 'success', 'result': [scene]})]
-            before = self.session.request.call_count
-            with self.assertRaisesRegex(ProviderError, 'описание сцены'):
-                await self.ai.generate_image(42, job, 1, 0, 'Long context. ' * 500, [], 'square')
-            self.assertEqual(self.session.request.call_count, before + 2)
-            self.assertIsNone(self.store.db.execute("SELECT 1 FROM ai_requests WHERE job_id=? AND kind='image'", (job,)).fetchone())
+    async def test_empty_image_prompt_never_submits_a_paid_request(self):
+        for prompt in ('', '   '):
+            with self.assertRaisesRegex(ProviderError, 'пустой промпт'):
+                await self.ai.generate_image(42, self.job, 1, 0, prompt, [], 'square')
+        self.session.request.assert_not_called()
 
     async def test_known_image_request_resumes_without_starting_new_scene_preparation(self):
         self.store.db.execute("INSERT INTO ai_requests(job_id,revision,kind,slot,model,status,request_id) VALUES (?,1,'image',0,'seedream-v5-lite','processing','806')", (self.job,))
@@ -274,24 +259,27 @@ class GenAPITests(unittest.IsolatedAsyncioTestCase):
                              ('LEGACY_PROMPT_WITH_ARTICLE_SECRET', self.job))
         self.store.db.execute("INSERT INTO ai_requests(job_id,revision,kind,slot,model,status,result) VALUES (?,1,'image_prompt',0,'gpt-6-luna','success',?)",
             (self.job, json.dumps({'result': ['LEGACY_SCENE_WITH_ARTICLE_SECRET']})))
+        self.store.db.execute("INSERT INTO ai_requests(job_id,revision,kind,slot,model,status,result) VALUES (?,1,'image_prompt_v2',0,'gpt-6-luna','success',?)",
+            (self.job, json.dumps({'result': ['GENERATED_SCENE_SECRET']})))
         self.store.db.execute("INSERT INTO ai_requests(job_id,revision,kind,slot,model,status) VALUES (?,1,'image',0,'seedream-v5-lite','rejected')", (self.job,))
         self.session.request.side_effect = [response({'request_id': 900}),
-            response({'status': 'success', 'result': ['A scene from the original user task.']}),
-            response({'request_id': 901}), response({'status': 'success', 'result': ['https://cdn.example/new.png']})]
+            response({'status': 'success', 'result': ['https://cdn.example/new.png']})]
         self.session.get.return_value = response()
         bot = VkBot(self.settings, self.store, SimpleNamespace(send=AsyncMock(), send_photo=AsyncMock()),
                     text_ai=self.ai, image_ai=self.ai)
         await bot.generate_images(42, 42, self.job, 1)
-        preparation = self.session.request.call_args_list[0].kwargs['json']
-        actual_prompt = preparation['messages'][0]['content']
+        posted = self.session.request.call_args_list[0]
+        self.assertTrue(posted.args[1].endswith('/seedream-v5-lite'))
+        parts = posted.kwargs['data']._fields
+        actual_prompt = next(value for options, headers, value in parts if options['name'] == 'prompt')
         self.assertIn('ORIGINAL_USER_TASK', actual_prompt)
         self.assertIn('USER_CONCEPT', actual_prompt)
         self.assertIn('CHARACTER_DESCRIPTION', actual_prompt)
         for forbidden in ('GENERATED_ARTICLE_SECRET', 'PREVIOUS_ARTICLE_SECRET', 'TEXT_CORRECTION_SECRET',
-                          'LEGACY_PROMPT_WITH_ARTICLE_SECRET', 'LEGACY_SCENE_WITH_ARTICLE_SECRET'):
+                          'LEGACY_PROMPT_WITH_ARTICLE_SECRET', 'LEGACY_SCENE_WITH_ARTICLE_SECRET', 'GENERATED_SCENE_SECRET'):
             self.assertNotIn(forbidden, actual_prompt)
-        self.assertEqual(preparation['messages'][1]['content'][2]['image_url']['url'], image_uri(self.ref))
-        self.assertIsNotNone(self.store.db.execute("SELECT 1 FROM ai_requests WHERE kind='image_prompt_v2' AND request_id='900'").fetchone())
+        self.assertEqual(self.session.request.call_count, 2)
+        self.assertIsNotNone(self.store.db.execute("SELECT 1 FROM ai_requests WHERE kind='image' AND request_id='900'").fetchone())
         self.assertEqual(self.store.revision(42, self.job)['body'], 'GENERATED_ARTICLE_SECRET')
         self.assertNotIn('ARTICLE_SECRET', self.store.revision(42, self.job)['image_prompt'])
 

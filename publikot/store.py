@@ -482,7 +482,7 @@ class Store(PlatformStore):
         path = images[0] if images else None
         with self.transaction():
             self.expect_review(actor, ident, revision)
-            if retry_unknown and not self.db.execute("SELECT 1 FROM ai_requests WHERE job_id=? AND revision=? AND kind IN ('image','image_prompt_v2') AND status='submitting' AND request_id=''", (ident, revision)).fetchone():
+            if retry_unknown and not self.db.execute("SELECT 1 FROM ai_requests WHERE job_id=? AND revision=? AND kind='image' AND status='submitting' AND request_id=''", (ident, revision)).fetchone():
                 raise Conflict('Нет запроса изображений с потерянным ID. Откройте задание заново.')
             old = self.revision(actor, ident)
             next_revision = revision + 1
@@ -498,11 +498,11 @@ class Store(PlatformStore):
                 # Unknown requests stay in the previous revision for audit/history checks.
                 self.db.execute('''INSERT INTO ai_requests(job_id,revision,kind,slot,model,status,request_id,result,local_path,request_meta)
                     SELECT job_id,?,kind,slot,model,status,request_id,result,local_path,request_meta
-                    FROM ai_requests WHERE job_id=? AND revision=? AND kind IN ('image','image_prompt_v2')
+                    FROM ai_requests WHERE job_id=? AND revision=? AND kind='image'
                     AND (request_id<>'' OR status='rejected')''', (next_revision, ident, revision))
                 self.db.execute('''INSERT INTO ai_requests(job_id,revision,kind,slot,model,status)
                     SELECT job_id,?,kind,slot,model,'retry_authorized' FROM ai_requests
-                    WHERE job_id=? AND revision=? AND kind IN ('image','image_prompt_v2') AND status='submitting' AND request_id=''
+                    WHERE job_id=? AND revision=? AND kind='image' AND status='submitting' AND request_id=''
                     ''', (next_revision, ident, revision))
 
     def claim(self, owner, ident, revision):
