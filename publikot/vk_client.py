@@ -29,6 +29,24 @@ class VkApiError(ProviderError):
                          + hints.get(self.code, 'Проверьте права ключа и настройки сообщества.'))
 
 
+def vk_keyboard(value):
+    """Fit inline menus into VK's 6 rows, 5 columns and 10 buttons, without losing actions."""
+    if not value.get('inline'):
+        return value
+    rows = [list(row[offset:offset + 5]) for row in value.get('buttons', [])
+            for offset in range(0, len(row), 5)]
+    if sum(map(len, rows)) > 10:
+        raise ProviderError('Меню ВК содержит больше 10 кнопок. Разделите его на страницы.')
+    while len(rows) > 6:
+        candidates = [(len(rows[i]) + len(rows[i + 1]), i) for i in range(len(rows) - 1)
+                      if len(rows[i]) + len(rows[i + 1]) <= 5]
+        if not candidates:
+            raise ProviderError('Меню ВК не помещается в 6 строк.')
+        _, index = min(candidates)
+        rows[index:index + 2] = [rows[index] + rows[index + 1]]
+    return {**value, 'buttons': rows}
+
+
 def trusted_vk_url(value):
     url = urlparse(value)
     return (url.scheme == 'https' and not url.username and not url.password
@@ -137,7 +155,7 @@ class VkMessages:
             params = {'peer_id': peer, 'message': chunk, 'random_id': secrets.randbelow(2**31-1)+1}
             if index == len(chunks)-1:
                 if keyboard:
-                    params['keyboard'] = json.dumps(keyboard, ensure_ascii=False)
+                    params['keyboard'] = json.dumps(vk_keyboard(keyboard), ensure_ascii=False)
                 if attachment:
                     params['attachment'] = attachment
             try:

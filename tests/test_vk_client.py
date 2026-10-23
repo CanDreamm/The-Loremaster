@@ -1,11 +1,12 @@
 import unittest
+import json
 import tempfile
 from pathlib import Path
 from unittest.mock import AsyncMock
 
 from publikot.__main__ import advance_server, event_failure
 from publikot.providers import ProviderError
-from publikot.vk_client import VkApiError, VkMessages, trusted_vk_url
+from publikot.vk_client import VkApiError, VkMessages, trusted_vk_url, vk_keyboard
 from publikot.store import Store
 
 
@@ -35,6 +36,26 @@ class Session:
 
 
 class VkClientTests(unittest.IsolatedAsyncioTestCase):
+    async def test_inline_keyboard_is_compacted_before_sending_without_losing_callbacks(self):
+        buttons = [{'action': {'type': 'callback', 'label': str(i), 'payload': json.dumps({'id': i})},
+                    'color': 'secondary'} for i in range(10)]
+        original = {'inline': True, 'buttons': [buttons[:2], buttons[2:4], *[[b] for b in buttons[4:]]]}
+        before = json.dumps(original)
+        session = Session({'response': 100})
+        await VkMessages('private-key', 123, session).send(42, 'Настройки', keyboard=original)
+        sent = json.loads(session.calls[0][1]['data']['keyboard'])
+        self.assertLessEqual(len(sent['buttons']), 6)
+        self.assertTrue(all(1 <= len(row) <= 5 for row in sent['buttons']))
+        self.assertEqual([b for row in sent['buttons'] for b in row], buttons)
+        self.assertEqual(json.dumps(original), before)
+
+    async def test_oversized_keyboard_does_not_silently_discard_buttons(self):
+        session = Session({'response': 100})
+        keys = {'inline': True, 'buttons': [[{'action': {'type': 'callback', 'label': str(i)}}] for i in range(11)]}
+        with self.assertRaises(ProviderError):
+            await VkMessages('private-key', 123, session).send(42, 'Меню', keyboard=keys)
+        self.assertEqual(session.calls, [])
+
     async def test_callback_events_are_enabled_without_disabling_other_subscriptions(self):
         client = VkMessages('private-key', 123, None)
         client.api = AsyncMock(side_effect=[{'enabled': 1, 'api_version': '5.199',

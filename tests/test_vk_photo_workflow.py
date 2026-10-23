@@ -36,6 +36,11 @@ class VkPhotoWorkflow(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(fields['access_token'], 'vk-message-key')
                     calls.append(method)
                     if method == 'messages.send':
+                        if 'keyboard' in fields:
+                            keys = json.loads(fields['keyboard'])
+                            self.assertLessEqual(len(keys['buttons']), 6)
+                            self.assertLessEqual(sum(map(len, keys['buttons'])), 10)
+                            self.assertTrue(all(1 <= len(row) <= 5 for row in keys['buttons']))
                         sent += 1
                         return web.json_response({'response': sent})
                     if method == 'messages.sendMessageEventAnswer':
@@ -115,6 +120,9 @@ class VkPhotoWorkflow(unittest.IsolatedAsyncioTestCase):
                                           'object': {'message': message}})
                     with patch('publikot.genapi.BASE', str(server.make_url('/gen'))):
                         await send('/new Бренд')
+                        await bot.handle({'group_id': 123, 'type': 'message_event', 'object': {
+                            'user_id': 42, 'peer_id': 42, 'event_id': 'settings-callback',
+                            'payload': {'action': 'menu', 'screen': 'settings', 'project': store.project(42)['id']}}})
                         await send('/concept Добрый персонаж')
                         await send('/style Мягкий свет', photo=True)
                         await send('/character Узнаваемая внешность', photo=True)
