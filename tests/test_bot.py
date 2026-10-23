@@ -6,7 +6,7 @@ from dataclasses import replace
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
-from publikot.providers import AmbiguousPublish
+from publikot.providers import AmbiguousPublish, ProviderError
 from publikot.oauth import OAuthManager, VkOAuthProvider
 from publikot.settings import Settings
 from publikot.store import Store
@@ -434,6 +434,52 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(args[5]), 1)
         self.assertNotEqual(args[5][0]['path'], old_ref)
         self.assertNotIn('/new-generated.png', str(args[5]))
+
+    async def test_failed_text_edit_shows_reason_and_can_restore_and_edit_again(self):
+        project = await self.setup_project()
+        self.app.settings = replace(self.settings, demo=False)
+        ai = AsyncMock(return_value='ORIGINAL_APPROVED_TEXT')
+        self.app.text_ai.generate = ai
+        await self.send('/post История')
+        job = self.store.job(42)
+        self.store.replace_images(42, job['id'], job['revision'], ['/saved-picture.png'])
+        await self.send(f"/job {job['id']}")
+        await self.click('Изменить текст')
+        ai.side_effect = ProviderError('GenAPI: запрос ещё не готов.')
+        await self.send('Более развернуто')
+        failed = self.store.job(42)
+        self.assertEqual(failed['status'], 'failed')
+        self.assertEqual(failed['generation_error'], 'GenAPI: запрос ещё не готов.')
+        # Open via the same project-menu route shown in the user's screenshot.
+        await self.send(payload={'action': 'menu', 'screen': 'job', 'project': project, 'job': job['id']})
+        self.assertIn('Вернуться к тексту', self.labels())
+        self.assertIn('GenAPI: запрос ещё не готов.', self.client.sent[-1]['text'])
+        self.assertIn('ORIGINAL_APPROVED_TEXT', self.client.sent[-2]['text'])
+        self.assertNotIn('Проверить результат ИИ', self.labels())  # No known external ID.
+        calls = ai.await_count
+        await self.click('Вернуться к тексту')
+        self.assertEqual(ai.await_count, calls)
+        restored = self.store.job(42)
+        self.assertEqual(restored['status'], 'review')
+        self.assertGreater(restored['revision'], failed['revision'])
+        self.assertEqual(self.store.revision(42, job['id'])['body'], 'ORIGINAL_APPROVED_TEXT')
+        self.assertEqual(json.loads(self.store.revision(42, job['id'])['image_paths']), ['/saved-picture.png'])
+        ai.side_effect = None
+        ai.return_value = 'REVISED_TEXT'
+        await self.click('Изменить текст')
+        await self.send('Напиши подробнее')
+        self.assertEqual(self.store.revision(42, job['id'])['body'], 'REVISED_TEXT')
+        self.assertIn('Напиши подробнее', ai.call_args.kwargs['prompt'])
+
+    async def test_unexpected_text_error_is_reported_without_exposing_exception_contents(self):
+        await self.setup_project()
+        self.app.text_ai.generate = AsyncMock(side_effect=RuntimeError('SECRET_KEY_CONTENT'))
+        await self.send('/post История')
+        job = self.store.job(42)
+        self.assertEqual(job['status'], 'failed')
+        self.assertIn('RuntimeError', job['generation_error'])
+        self.assertNotIn('SECRET_KEY_CONTENT', job['generation_error'])
+        self.assertIn('RuntimeError', self.client.sent[-1]['text'])
 
     async def test_demo_sends_both_prompts_automatically_on_creation_revision_and_reopen(self):
         await self.setup_project()

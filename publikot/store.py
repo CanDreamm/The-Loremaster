@@ -148,6 +148,8 @@ class Store(PlatformStore):
         for field in ('image_brief', 'image_reference_path'):
             if field not in {r['name'] for r in self.db.execute('PRAGMA table_info(jobs)')}:
                 self.db.execute(f"ALTER TABLE jobs ADD COLUMN {field} TEXT NOT NULL DEFAULT ''")
+        if 'generation_error' not in {r['name'] for r in self.db.execute('PRAGMA table_info(jobs)')}:
+            self.db.execute("ALTER TABLE jobs ADD COLUMN generation_error TEXT NOT NULL DEFAULT ''")
         if 'image_tasks' not in {r['name'] for r in self.db.execute('PRAGMA table_info(jobs)')}:
             self.db.execute("ALTER TABLE jobs ADD COLUMN image_tasks TEXT NOT NULL DEFAULT '{}'")
         if 'restored_job_id' not in {r['name'] for r in self.db.execute('PRAGMA table_info(jobs)')}:
@@ -452,7 +454,7 @@ class Store(PlatformStore):
             if prompts is not None:
                 self.db.execute('UPDATE versions SET text_prompt=?,image_prompt=?,prompt_materials=? WHERE job_id=? AND revision=?',
                     (prompts.text, prompts.image, json.dumps(prompts.materials, ensure_ascii=False), ident, revision))
-            self.db.execute("UPDATE jobs SET status='review' WHERE id=?", (ident,))
+            self.db.execute("UPDATE jobs SET status='review',generation_error='' WHERE id=?", (ident,))
 
     def revision(self, owner, ident):
         job = self.job(owner, ident)
@@ -467,6 +469,24 @@ class Store(PlatformStore):
             previous = dict(self.revision(owner, job['id']))
             self.db.execute("UPDATE jobs SET revision=revision+1,status='generating' WHERE id=?", (job['id'],))
         return self.job(owner, job['id']), previous
+
+    def restore_text_draft(self, actor, ident, revision):
+        with self.transaction():
+            job = self.job(actor, ident)
+            if job['status'] != 'failed' or job['revision'] != revision:
+                raise Conflict('Эта кнопка устарела или задание уже обработано.')
+            if self.revision(actor, ident) is not None:
+                raise Conflict('Восстановление доступно только после ошибки генерации текста.')
+            old = self.db.execute('SELECT * FROM versions WHERE job_id=? AND revision<? '
+                                  'ORDER BY revision DESC LIMIT 1', (ident, revision)).fetchone()
+            if old is None:
+                raise Conflict('Предыдущего текста нет.')
+            fields = ('body', 'is_demo', 'image_path', 'text_prompt', 'image_prompt', 'prompt_materials', 'image_paths')
+            self.db.execute('INSERT INTO versions(job_id,revision,' + ','.join(fields) + ') VALUES (?,?,'
+                            + ','.join('?' for _ in fields) + ')',
+                            (ident, revision + 1, *(old[f] for f in fields)))
+            self.db.execute("UPDATE jobs SET revision=?,status='review',generation_error='',image_path=?,image_paths=? WHERE id=?",
+                            (revision + 1, old['image_path'], old['image_paths'], ident))
 
     def expect_review(self, actor, ident, revision):
         job = self.job(actor, ident)

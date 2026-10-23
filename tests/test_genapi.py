@@ -414,6 +414,35 @@ class GenAPITests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.store.job(42, self.job)['status'], 'review')
         self.assertEqual(self.store.revision(42, self.job)['body'], 'Согласованный текст')
 
+    async def test_resume_without_known_request_id_never_posts(self):
+        self.store.db.execute("UPDATE jobs SET status='failed',generation_context=? WHERE id=?",
+                              (json.dumps({'project': dict(self.store.require(42, self.project))}), self.job))
+        bot = VkBot(self.settings, self.store, SimpleNamespace(send=AsyncMock(), send_photo=AsyncMock()),
+                    text_ai=self.ai, image_ai=self.ai)
+        with self.assertRaisesRegex(Conflict, 'Нет сохранённого запроса'):
+            await bot.generate(42, 42, '/resume', '', {})
+        self.session.request.assert_not_called()
+        self.assertEqual(self.store.job(42)['status'], 'failed')
+
+    async def test_failed_revision_resumes_saved_request_without_losing_previous_text(self):
+        self.store.save_version(42, self.job, 1, 'Previous approved text', False)
+        client = SimpleNamespace(send=AsyncMock(), send_photo=AsyncMock())
+        bot = VkBot(self.settings, self.store, client, text_ai=self.ai, image_ai=self.ai)
+        self.session.request.side_effect = [response({'request_id': 1104}),
+            response({'status': 'processing'}), response({'status': 'processing'})]
+        with self.assertRaises(ProviderError):
+            await bot.generate(42, 42, '/revise', 'Более развернуто', {})
+        self.assertEqual(self.store.job(42)['status'], 'failed')
+        self.assertEqual(self.store.job(42)['revision'], 2)
+        await bot.menu(42, 42, {'screen': 'job', 'project': self.project, 'job': self.job})
+        self.assertIn('1104', client.send.call_args.args[1])
+        self.assertIn('Проверить результат ИИ', str(client.send.call_args.kwargs['keyboard']))
+        self.session.request.side_effect = [response({'status': 'success', 'result': ['Revised text']})]
+        await bot.generate(42, 42, '/resume', '', {})
+        self.assertEqual(self.store.revision(42, self.job)['body'], 'Revised text')
+        self.assertEqual(self.store.job(42)['generation_error'], '')
+        self.assertEqual(sum(c.args[0] == 'POST' for c in self.session.request.call_args_list), 1)
+
     async def test_bot_resume_uses_original_project_settings_and_never_resubmits(self):
         self.store.configure(42, 'concept', 'Исходный характер')
         self.store.configure(42, 'image_count', 0)

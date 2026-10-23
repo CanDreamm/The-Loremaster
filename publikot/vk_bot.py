@@ -186,10 +186,25 @@ class VkBot(BotMenus):
         version = self.store.revision(actor, ident)
         if version is None:
             if job['status'] == 'failed' and job['generation_context']:
-                return await self.client.send(peer, f'Задание №{ident}: генерация текста не завершена. '
-                    'Можно проверить сохранённый запрос без повторной отправки.', keyboard=keyboard(
-                        [{'action': {'type': 'callback', 'label': 'Проверить результат ИИ',
-                           'payload': json.dumps({'action': 'resume', 'job': ident, 'revision': job['revision']})}}], back(job['project_id'])))
+                request = self.store.db.execute("SELECT status,request_id FROM ai_requests WHERE job_id=? "
+                    "AND revision=? AND kind='text' AND slot=0", (ident, job['revision'])).fetchone()
+                can_resume = request and request['status'] not in ('error', 'rejected') and bool(request['request_id'])
+                rows = []
+                if can_resume:
+                    rows.append([{'action': {'type': 'callback', 'label': 'Проверить результат ИИ',
+                        'payload': json.dumps({'action': 'resume', 'job': ident, 'revision': job['revision']})}}])
+                previous = self.store.db.execute('SELECT body FROM versions WHERE job_id=? AND revision<? '
+                    'ORDER BY revision DESC LIMIT 1', (ident, job['revision'])).fetchone()
+                text = f'Задание №{ident}: генерация текста не завершена.'
+                text += '\n' + (job['generation_error'] or 'Причина старой ошибки не сохранена.')
+                if previous:
+                    await self.client.send(peer, 'Предыдущий текст сохранён:\n\n' + previous['body'])
+                    rows.append([{'action': {'type': 'callback', 'label': 'Вернуться к тексту',
+                        'payload': json.dumps({'action': 'restoretext', 'job': ident, 'revision': job['revision']})}}])
+                if can_resume:
+                    text += '\nМожно проверить сохранённый запрос без новой генерации.'
+                rows.append(back(job['project_id']))
+                return await self.client.send(peer, text, keyboard=keyboard(*rows))
             raise Conflict('Черновик ещё не готов.')
         label = f"Проект №{job['project_id']}, задание №{ident}, версия {job['revision']}\n"
         if job['publish_mode'] == 'platforms':
@@ -367,10 +382,15 @@ class VkBot(BotMenus):
                 job = s.job(actor)
                 if job['status'] != 'failed' or not job['generation_context']:
                     raise Conflict('Нет прерванной генерации текста. Откройте нужное задание.')
-                ident, revision = job['id'], job['revision']
                 context = json.loads(job['generation_context'])
                 if not isinstance(self.text_ai, GenAPI):
                     raise Conflict('Возобновление доступно для GenAPI.')
+                request = s.db.execute("SELECT status,request_id FROM ai_requests WHERE job_id=? AND revision=? "
+                    "AND kind='text' AND slot=0", (job['id'], job['revision'])).fetchone()
+                if not request or not request['request_id'] or request['status'] in ('error', 'rejected'):
+                    raise Conflict('Нет сохранённого запроса, результат которого можно проверить. '
+                                   'Откройте задание и вернитесь к предыдущему тексту, если он есть.')
+                ident, revision = job['id'], job['revision']
                 s.db.execute("UPDATE jobs SET status='generating' WHERE id=?", (ident,))
             elif command == '/revise':
                 job, old = s.revise(actor)
@@ -399,10 +419,16 @@ class VkBot(BotMenus):
             options = {'materials': prompts.materials, 'request_key': (actor, ident, revision)} if isinstance(self.text_ai, GenAPI) else {}
             body = await self.text_ai.generate(project['concept'], brief, previous, feedback, prompt=prompts.text, **options)
             s.save_version(actor, ident, revision, body, self.settings.demo, prompts=prompts)
-        except Exception:
+        except Exception as error:
+            detail = str(error) if isinstance(error, (Conflict, ProviderError)) else (
+                f'Не удалось подготовить текст ({type(error).__name__}). Проверьте журнал бота.')
             if ident is not None:
-                s.finish(actor, ident, 'failed')
-            raise
+                # Do not overwrite a newer version or a completed draft after a stale action.
+                s.db.execute("UPDATE jobs SET status='failed',generation_error=? WHERE id=? "
+                             "AND revision=? AND status IN ('generating','failed')", (detail, ident, revision))
+            if isinstance(error, (Conflict, ProviderError)):
+                raise
+            raise ProviderError(detail) from None
         await self.preview(actor, peer, ident)
 
     async def generate_images(self, actor, peer, ident, revision, slot=None, new_task='', reference=''):
@@ -505,6 +531,9 @@ class VkBot(BotMenus):
             await self.client.send(peer, 'Текст и изображения сохранены в восстановленном черновике. '
                 'ИИ повторно не вызывается. Проверьте и подтвердите публикацию.')
             return await self.preview(actor, peer, new)
+        if action == 'restoretext':
+            s.restore_text_draft(actor, ident, revision)
+            return await self.preview(actor, peer, ident)
         if action == 'resume':
             job = s.job(actor, ident)
             if job['revision'] != revision or job['status'] != 'failed':

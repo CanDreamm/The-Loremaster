@@ -292,7 +292,7 @@ class BotMenus(PlatformMenus):
             self.store.select_job(actor, job['id'])
             await self.client.send(peer, f"Задание №{job['id']}: {self.job_label(job['status'])}"
                                    + ('\n' + job['remote_url'] if job['remote_url'] else ''))
-            if self.store.revision(actor, job['id']):
+            if self.store.revision(actor, job['id']) or (job['status'] == 'failed' and job['generation_context']):
                 await self.preview(actor, peer, job['id'])
             return
         if screen == 'prompts':
