@@ -147,6 +147,8 @@ class Store(PlatformStore):
         for field in ('image_brief', 'image_reference_path'):
             if field not in {r['name'] for r in self.db.execute('PRAGMA table_info(jobs)')}:
                 self.db.execute(f"ALTER TABLE jobs ADD COLUMN {field} TEXT NOT NULL DEFAULT ''")
+        if 'image_tasks' not in {r['name'] for r in self.db.execute('PRAGMA table_info(jobs)')}:
+            self.db.execute("ALTER TABLE jobs ADD COLUMN image_tasks TEXT NOT NULL DEFAULT '{}'")
         if 'restored_job_id' not in {r['name'] for r in self.db.execute('PRAGMA table_info(jobs)')}:
             self.db.execute('ALTER TABLE jobs ADD COLUMN restored_job_id INTEGER')
         self.db.execute('''CREATE TABLE IF NOT EXISTS ai_requests (
@@ -482,12 +484,20 @@ class Store(PlatformStore):
             images[slot] = path
         self.replace_images(actor, ident, revision, images)
 
-    def replace_images(self, actor, ident, revision, images, *, retry_unknown=False, image_prompt=None):
+    def replace_images(self, actor, ident, revision, images, *, retry_unknown=False, image_prompt=None, image_task=None):
         from .media import paths
         images = paths(images)
         path = images[0] if images else None
         with self.transaction():
-            self.expect_review(actor, ident, revision)
+            job = self.expect_review(actor, ident, revision)
+            if image_task is not None:
+                slot, brief, reference = image_task
+                if not 0 <= slot < len(images):
+                    raise Conflict('Изображение не найдено.')
+                tasks = json.loads(job['image_tasks'])
+                tasks[str(slot)] = {'brief': brief, 'reference': reference}
+                self.db.execute('UPDATE jobs SET image_tasks=? WHERE id=?',
+                                (json.dumps(tasks, ensure_ascii=False), ident))
             if retry_unknown and not self.db.execute("SELECT 1 FROM ai_requests WHERE job_id=? AND revision=? AND kind='image' AND status='submitting' AND request_id=''", (ident, revision)).fetchone():
                 raise Conflict('Нет запроса изображений с потерянным ID. Откройте задание заново.')
             old = self.revision(actor, ident)
@@ -572,7 +582,7 @@ class Store(PlatformStore):
             old = dict(self.revision(actor, ident))
             new = self.next_id('jobs')
             fields = ('project_id', 'brief', 'image_path', 'target_group', 'reference_path',
-                      'publish_mode', 'browser_target', 'destinations', 'image_paths', 'generation_context', 'image_brief', 'image_reference_path')
+                      'publish_mode', 'browser_target', 'destinations', 'image_paths', 'generation_context', 'image_brief', 'image_reference_path', 'image_tasks')
             self.db.execute('INSERT INTO jobs(id,owner,status,' + ','.join(fields) + ') VALUES (?, ?, \'review\','
                             + ','.join('?' for _ in fields) + ')', (new, actor, *(job[f] for f in fields)))
             fields = ('body', 'is_demo', 'image_path', 'text_prompt', 'image_prompt', 'prompt_materials', 'image_paths')

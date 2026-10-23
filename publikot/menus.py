@@ -409,13 +409,15 @@ class BotMenus(PlatformMenus):
                                       (text, reference or '', state['job']))
             self.store.set_dialog(actor, None)
             await self.generate_images(actor, peer, state['job'], state['revision'],
-                                       state.get('slot'), state.get('feedback', ''))
+                                       state.get('slot'))
         elif kind == 'ai_image':
-            if not text or len(text) > 4000:
-                raise Conflict('Отправьте замечания к изображению до 4000 символов.')
+            if not text or len(text) > 12000:
+                raise Conflict('Отправьте новое задание для изображения до 12000 символов.')
             self.store.expect_review(actor, state['job'], state['revision'])
+            reference = await self.photo(message, 'images')
             self.store.set_dialog(actor, None)
-            await self.generate_images(actor, peer, state['job'], state['revision'], state['slot'], text)
+            await self.generate_images(actor, peer, state['job'], state['revision'],
+                                       state['slot'], text, reference or '')
         elif kind in ('post', 'revise', 'image'):
             if kind != 'image' and (not text or len(text) > 12000):
                 raise Conflict('Отправьте текст задания до 12000 символов.')

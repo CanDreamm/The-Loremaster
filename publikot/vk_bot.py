@@ -45,7 +45,7 @@ def preview_keyboard(job, is_demo=False):
     if not is_demo and count:
         rows.append([button('Создать изображение', 'generateimages')])
         for slot in range(len(version_images(job))):
-            rows.append([button(f'Изменить изображение {slot + 1}', f'regenimage{slot}')])
+            rows.append([button(f'Создать заново №{slot + 1}', f'regenimage{slot}')])
     rows.append(([button('Опубликовать', 'publish', 'positive')] if not is_demo and len(version_images(job)) >= count and (job.get('destinations', '[]') != '[]' if job.get('publish_mode') == 'platforms' else job['target_group'] or job.get('browser_target')) else [])
                 + [button('Отменить черновик', 'cancel', 'negative')])
     rows.append(back(job['project_id']))
@@ -405,7 +405,7 @@ class VkBot(BotMenus):
             raise
         await self.preview(actor, peer, ident)
 
-    async def generate_images(self, actor, peer, ident, revision, slot=None, feedback=''):
+    async def generate_images(self, actor, peer, ident, revision, slot=None, new_task='', reference=''):
         s = self.store
         job = s.expect_review(actor, ident, revision)
         old = s.revision(actor, ident)
@@ -416,9 +416,17 @@ class VkBot(BotMenus):
         count = project['image_count']
         if not count:
             raise Conflict('В настройках этого задания выбрано 0 изображений.')
-        if not job['image_brief']:
+        if new_task:
+            if slot is None:
+                raise Conflict('Выберите изображение для новой генерации.')
+            s.replace_images(actor, ident, revision, version_images(old),
+                             image_task=(slot, new_task, reference))
+            revision += 1
+            job, old = s.expect_review(actor, ident, revision), s.revision(actor, ident)
+        tasks = json.loads(job['image_tasks'])
+        if not job['image_brief'] and not (slot is not None and str(slot) in tasks):
             return await self.prompt(actor, peer, {'kind': 'image_task', 'project': job['project_id'],
-                'job': ident, 'revision': revision, 'slot': slot, 'feedback': feedback},
+                'job': ident, 'revision': revision, 'slot': slot},
                 'Что изобразить? Отправьте задание для изображения. Можно приложить фото предмета или референс.')
         images = version_images(old)
         if slot is not None and not 0 <= slot < len(images):
@@ -441,22 +449,19 @@ class VkBot(BotMenus):
             await self.client.send(peer, 'Создаю изображения по заданию, концепции проекта и фото персонажей. Это может занять несколько минут.')
             # Rebuild even legacy drafts: their saved image_prompt can contain the generated article.
             source_materials = context.get('materials', json.loads(old['prompt_materials'] or '[]'))
-            base_prompt = build_image_prompt(project, job['image_brief'], source_materials)
-            materials = [{'role': 'character', 'path': m['path']} for m in source_materials
-                         if m and m.get('kind', m.get('role')) == 'character']
-            if job['image_reference_path']:
-                materials.append({'role': 'reference', 'path': job['image_reference_path']})
-                base_prompt += '\n\nДополнительный референс: фото из задания для изображения.'
+            characters = [{'role': 'character', 'path': m['path']} for m in source_materials
+                          if m and m.get('kind', m.get('role')) == 'character']
             for index in slots:
+                task = tasks.get(str(index), {'brief': job['image_brief'],
+                                              'reference': job['image_reference_path']})
+                base_prompt = build_image_prompt(project, task['brief'], source_materials)
+                inputs = list(characters)
+                if task['reference']:
+                    inputs.append({'role': 'reference', 'path': task['reference']})
+                    base_prompt += '\n\nДополнительный референс: фото из задания для изображения.'
                 prompt = base_prompt + f'\n\nИллюстрация {index + 1} из {count}. '
                 prompt += 'Выбери сцену по заданию пользователя; сохрани общих персонажей, стиль и палитру концепции. '
-                prompt += 'Входные изображения по порядку: ' + ', '.join(m['role'] for m in materials) + '.'
-                if feedback:
-                    prompt += '\nЗамечания к этому изображению:\n' + feedback
-                inputs = list(materials)
-                if index < len(images):
-                    prompt += '\nПоследний входной референс — предыдущий вариант этой картинки. Внеси изменения, сохранив остальные детали.'
-                    inputs.append({'role': 'reference', 'path': images[index]})
+                prompt += 'Входные изображения по порядку: ' + ', '.join(m['role'] for m in inputs) + '.'
                 path = await self.image_ai.generate_image(actor, ident, revision, index, prompt, inputs, project['image_format'])
                 if index < len(images):
                     images[index] = path
@@ -518,7 +523,7 @@ class VkBot(BotMenus):
                 raise Conflict('Изображение не найдено.')
             return await self.prompt(actor, peer, {'kind': 'ai_image', 'project': job['project_id'],
                 'job': ident, 'revision': revision, 'slot': slot},
-                f'Что изменить в изображении {slot + 1}? Перегенерируется только оно, остальные сохранятся.')
+                f'Отправьте новое задание для изображения {slot + 1}. Можно приложить новый референс. Создам картинку заново, остальные сохранятся.')
         if action == 'cancel':
             s.cancel(actor, ident, revision)
             return await self.client.send(peer, 'Задание отменено.', keyboard=keyboard(back(job['project_id'])))

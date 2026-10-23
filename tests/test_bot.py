@@ -397,6 +397,44 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
         await self.send('Сделай короче')
         self.assertEqual(self.store.job(42)['image_brief'], 'IMAGE_TASK_ONLY')
 
+    async def test_regeneration_uses_only_new_task_and_new_reference_and_can_resume(self):
+        await self.setup_project()
+        self.app.settings = replace(self.settings, demo=False)
+        self.app.text_ai.generate = AsyncMock(return_value='PUBLICATION_SECRET')
+        ai = AsyncMock(return_value='/old-generated.png')
+        self.app.image_ai = SimpleNamespace(generate_image=ai)
+        await self.send('/post TEXT_TASK_SECRET')
+        await self.click('Создать изображение')
+        await self.send('OLD_IMAGE_TASK_SECRET', photo=True)
+        old_ref = self.store.job(42)['image_reference_path']
+        await self.click('Создать заново №1')
+        self.assertEqual(ai.await_count, 1)
+        ai.side_effect = RuntimeError('Interrupted generation')
+        # Call the dialog directly to observe the interrupted request.
+        with self.assertRaises(RuntimeError):
+            await self.app.dialog_input(42, 42, 'NEW_IMAGE_TASK', {'attachments': []})
+        job = self.store.job(42)
+        self.assertEqual(job['status'], 'review')
+        self.assertEqual(json.loads(job['image_tasks'])['0'], {'brief': 'NEW_IMAGE_TASK', 'reference': ''})
+        ai.side_effect = None
+        ai.return_value = '/new-generated.png'
+        await self.app.generate_images(42, 42, job['id'], job['revision'], 0)
+        args = ai.call_args.args
+        self.assertIn('NEW_IMAGE_TASK', args[4])
+        for forbidden in ('OLD_IMAGE_TASK_SECRET', 'PUBLICATION_SECRET', 'TEXT_TASK_SECRET', 'Внеси изменения'):
+            self.assertNotIn(forbidden, args[4])
+        self.assertEqual(args[5], [])
+        self.assertNotIn(old_ref, str(args))
+        self.assertEqual(self.store.revision(42, job['id'])['body'], 'PUBLICATION_SECRET')
+        await self.click('Создать заново №1')
+        await self.send('ANOTHER_NEW_TASK', photo=True)
+        args = ai.call_args.args
+        self.assertIn('ANOTHER_NEW_TASK', args[4])
+        self.assertNotIn('NEW_IMAGE_TASK', args[4])
+        self.assertEqual(len(args[5]), 1)
+        self.assertNotEqual(args[5][0]['path'], old_ref)
+        self.assertNotIn('/new-generated.png', str(args[5]))
+
     async def test_demo_sends_both_prompts_automatically_on_creation_revision_and_reopen(self):
         await self.setup_project()
         await self.send('/post Расскажи про кофе', photo=True)

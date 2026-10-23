@@ -106,10 +106,13 @@ class GenAPIWholeStack(unittest.IsolatedAsyncioTestCase):
                                 self.assertIn('не рисуй надписей', data['prompt'])
                                 self.assertNotIn(ARTICLE, data['prompt'])
                                 self.assertIn('ДЕТАЛЬ КОНЦЕПЦИИ ' * 300, data['prompt'])
-                                self.assertIn('Изобрази открытие кофейни', data['prompt'])
+                                if 'Новая сцена на пляже' in data['prompt']:
+                                    self.assertNotIn('Изобрази открытие кофейни', data['prompt'])
+                                else:
+                                    self.assertIn('Изобрази открытие кофейни', data['prompt'])
                                 self.assertNotIn('Расскажи, как открылась кофейня', data['prompt'])
                                 self.assertIn('Материал character', data['prompt'])
-                                self.assertEqual(len(data['image_urls']), 2 if 'Замечания' in data['prompt'] else 1)
+                                self.assertEqual(len(data['image_urls']), 1)
                                 self.assertTrue(route.endswith('/gpt-image-2-5'))
                                 self.assertEqual(data['num_images'], 1)
                                 self.assertEqual((data['model'], data['quality'], data['image_size']), ('flare', 'low', '1024x1024'))
@@ -245,7 +248,7 @@ class GenAPIWholeStack(unittest.IsolatedAsyncioTestCase):
                         self.assertEqual(len(images), 3)
                         self.assertTrue(all(Path(p).read_bytes() == PNG for p in images))
                         # Changing one picture retains the other two and the entire article.
-                        await bot.generate_images(99, 99, job['id'], job['revision'], 1, 'Сделай светлее')
+                        await bot.generate_images(99, 99, job['id'], job['revision'], 1, 'Новая сцена на пляже')
                         new_images = version_images(store.revision(99, job['id']))
                         self.assertEqual((new_images[0], new_images[2]), (images[0], images[2]))
                         self.assertNotEqual(new_images[1], images[1])
