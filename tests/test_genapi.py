@@ -424,6 +424,31 @@ class GenAPITests(unittest.IsolatedAsyncioTestCase):
         self.session.request.assert_not_called()
         self.assertEqual(self.store.job(42)['status'], 'failed')
 
+    async def test_completed_text_is_saved_if_status_was_reset_during_generation(self):
+        client = SimpleNamespace(send=AsyncMock(), send_photo=AsyncMock())
+        bot = VkBot(self.settings, self.store, client, text_ai=self.ai, image_ai=self.ai)
+        original_generate = self.ai.generate
+        async def interrupted(*args, **kwargs):
+            body = await original_generate(*args, **kwargs)
+            ident = kwargs['request_key'][1]
+            # Reproduce the server diagnostic: matching revision, successful provider
+            # request, no saved version, but a status reset by another process.
+            self.store.db.execute("UPDATE jobs SET status='failed' WHERE id=?", (ident,))
+            return body
+        self.ai.generate = interrupted
+        self.session.request.side_effect = [response({'request_id': 1201}),
+            response({'status': 'success', 'result': ['Recovered publication']})]
+        await bot.generate(42, 42, '/post', 'Приветственная публикация', {})
+        ident = self.store.job(42)['id']
+        self.assertEqual(self.store.job(42)['status'], 'review')
+        self.assertEqual(self.store.revision(42, ident)['body'], 'Recovered publication')
+        self.session.request.side_effect = [response({'request_id': 1202}),
+            response({'status': 'success', 'result': ['Recovered revision']})]
+        await bot.generate(42, 42, '/revise', 'Более развернуто', {})
+        self.assertEqual(self.store.job(42)['status'], 'review')
+        self.assertEqual(self.store.revision(42, ident)['body'], 'Recovered revision')
+        self.assertEqual(sum(c.args[0] == 'POST' for c in self.session.request.call_args_list), 2)
+
     async def test_failed_revision_resumes_saved_request_without_losing_previous_text(self):
         self.store.save_version(42, self.job, 1, 'Previous approved text', False)
         client = SimpleNamespace(send=AsyncMock(), send_photo=AsyncMock())

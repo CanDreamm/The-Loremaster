@@ -23,6 +23,26 @@ class StoreTests(unittest.TestCase):
         self.store.save_version(42, ident, 1, 'Текст', demo)
         return ident
 
+    def test_failed_result_recovery_requires_exact_cached_text_and_current_unsent_revision(self):
+        import json
+        job, _ = self.store.create_job(42, 'Task')
+        self.store.db.execute("INSERT INTO ai_requests(job_id,revision,kind,slot,model,status,result) "
+                             "VALUES (?,1,'text',0,'gpt-6-luna','success',?)",
+                             (job, json.dumps({'result': ['Completed text']})))
+        self.store.db.execute("UPDATE jobs SET status='failed' WHERE id=?", (job,))
+        with self.assertRaises(Conflict):
+            self.store.save_version(42, job, 1, 'Different text', False)
+        with self.assertRaises(Conflict):
+            self.store.save_version(42, job, 2, 'Completed text', False)
+        self.store.save_version(42, job, 1, 'Completed text', False)
+        self.assertEqual(self.store.job(42, job)['status'], 'review')
+        self.store.claim(42, job, 1)
+        with self.assertRaises(Conflict):
+            self.store.save_version(42, job, 1, 'Completed text', False)
+        self.store.finish(42, job, 'failed')
+        with self.assertRaises(Conflict):
+            self.store.save_version(42, job, 1, 'Completed text', False)
+
     def test_second_store_cannot_interrupt_generation_or_publication(self):
         from publikot.settings import ConfigError
         job, _ = self.store.create_job(42, 'Live generation')

@@ -446,8 +446,23 @@ class Store(PlatformStore):
         with self.transaction():
             job = self.job(owner, ident)
             self.require(owner, job['project_id'])
-            if job['status'] != 'generating' or job['revision'] != revision:
-                raise Conflict('Задание уже изменилось.')
+            recover_completed = False
+            if job['status'] == 'failed' and not demo and job['revision'] == revision:
+                request = self.db.execute("SELECT result FROM ai_requests WHERE job_id=? AND revision=? "
+                    "AND kind='text' AND slot=0 AND status='success'", (ident, revision)).fetchone()
+                if request:
+                    try:
+                        recover_completed = json.loads(request['result']).get('result') == [body]
+                    except (ValueError, AttributeError):
+                        pass
+                # A completed AI result can restore only an unsent draft of the same version.
+                recover_completed = recover_completed and not self.db.execute(
+                    'SELECT 1 FROM deliveries WHERE job_id=?', (ident,)).fetchone() and not self.db.execute(
+                    'SELECT 1 FROM approvals WHERE job_id=?', (ident,)).fetchone() and not self.db.execute(
+                    'SELECT 1 FROM versions WHERE job_id=? AND revision=?', (ident, revision)).fetchone()
+            if job['revision'] != revision or (job['status'] != 'generating' and not recover_completed):
+                raise Conflict(f"Задание уже изменилось: ожидалась версия {revision}, "
+                               f"текущая версия {job['revision']}, состояние {job['status']}.")
             self.db.execute('INSERT INTO versions(job_id,revision,body,is_demo,image_path) VALUES (?,?,?,?,?)', (ident, revision, body, int(demo), job['image_path']))
             self.db.execute('UPDATE versions SET image_paths=? WHERE job_id=? AND revision=?',
                             (job['image_paths'], ident, revision))
