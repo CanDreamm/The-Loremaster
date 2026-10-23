@@ -28,10 +28,22 @@ class TextVolumeTests(unittest.TestCase):
                                feedback='Увеличь до 2000 символов').text
         self.assertIn('Увеличь до 2000 символов', prompt)
         self.assertIn('Напиши 1500 символов', prompt)
-        self.assertTrue(prompt.endswith('Манеру речи и рассказчика бери из настроек проекта.'))
+        self.assertTrue(prompt.endswith('Манеру речи, рассказчика и оформление бери из концепции проекта.'))
         self.assertEqual(prompt.count('до 500 символов'), 1)  # Only the user's saved project rule.
         self.assertIn('Если в замечаниях объём не изменён', prompt)
 
     def test_default_remains_for_a_short_task_without_length(self):
         self.assertIn('до 500 символов', build_prompts(self.project, 'Кот открыл кофейню').text)
+
+    def test_concept_is_used_and_removed_fields_and_style_reference_are_ignored(self):
+        project = {**self.project, 'concept': 'Разговорная речь. Акварель.',
+                   'tone': 'REMOVED-TONE', 'visual_style': 'REMOVED-STYLE'}
+        prompts = build_prompts(project, 'История', materials=[
+            {'kind': 'style', 'path': '/old-style.png', 'description': 'REMOVED-CAPTION'},
+            {'kind': 'character', 'path': '/cat.png', 'description': 'Рыжий кот'}])
+        for prompt in (prompts.text, prompts.image):
+            self.assertIn('Разговорная речь. Акварель.', prompt)
+            self.assertIn('Рыжий кот', prompt)
+            self.assertNotIn('REMOVED-', prompt)
+        self.assertEqual(prompts.materials, [{'role': 'character', 'path': '/cat.png'}])
 

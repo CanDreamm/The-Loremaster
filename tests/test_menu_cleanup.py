@@ -81,10 +81,10 @@ class MenuCleanupTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.store.db.execute('SELECT count(*) FROM inbox').fetchone()[0], 2)
 
     async def test_callback_starts_input_and_regular_text_saves_setting(self):
-        await self.click({'action': 'menu', 'screen': 'field_add', 'project': self.project, 'field': 'tone'})
+        await self.click({'action': 'menu', 'screen': 'field_add', 'project': self.project, 'field': 'concept'})
         self.assertEqual(self.store.dialog(42)['kind'], 'field')
         await self.send('Дружелюбный')
-        self.assertEqual(self.store.project(42)['tone'], 'Дружелюбный')
+        self.assertEqual(self.store.project(42)['concept'], 'Дружелюбный')
         self.assertIsNone(self.store.dialog(42))
         await self.click({'action': 'menu', 'screen': 'settings', 'project': self.project})
         self.assertIn('Настройки проекта', self.sent[-1]['message'])
@@ -160,8 +160,8 @@ class MenuCleanupTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.client.api.await_args_list[-1].args[0], 'messages.delete')
 
     async def test_material_photo_and_all_text_chunks_are_removed_on_next_button(self):
-        self.store.set_material(42, self.project, 'style', '/style.jpg', 'Пастель')
-        await self.send(screen='style', project=self.project)
+        self.store.set_material(42, self.project, 'character', '/character.jpg', 'Рыжий кот')
+        await self.send(screen='characters', project=self.project)
         old = self.client.tracked_messages(42)
         self.assertEqual(len(old), 2)
         await self.send(screen='settings', project=self.project)

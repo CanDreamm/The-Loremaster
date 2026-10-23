@@ -23,6 +23,36 @@ class StoreTests(unittest.TestCase):
         self.store.save_version(42, ident, 1, 'Текст', demo)
         return ident
 
+    def test_legacy_tone_and_style_migrate_to_concept_once_without_losing_files_or_drafts(self):
+        self.store.configure(42, 'concept', 'Истории рыжего кота')
+        self.store.configure(42, 'tone', 'Разговорная речь')
+        self.store.configure(42, 'visual_style', 'Мягкий свет')
+        self.store.set_material(42, self.project, 'style', '/archive/style.png', 'Тёплая палитра')
+        # Old databases may have both the textual field and a reference caption.
+        self.store.db.execute('UPDATE projects SET visual_style=? WHERE id=?', ('Мягкий свет', self.project))
+        job = self.draft()
+        self.store.db.execute("DELETE FROM schema_meta WHERE name='concept_consolidated'")
+        self.store.db.close()
+        self.store = Store(self.path)
+        project = self.store.project(42)
+        for value in ('Истории рыжего кота', 'Разговорная речь', 'Мягкий свет', 'Тёплая палитра'):
+            self.assertIn(value, project['concept'])
+        self.assertEqual((project['tone'], project['visual_style']), ('', ''))
+        self.assertEqual(self.store.material(42, self.project, 'style')['path'], '/archive/style.png')
+        self.assertEqual(self.store.revision(42, job)['body'], 'Текст')
+        self.store.configure(42, 'concept', 'Новая концепция без прежнего оформления')
+        self.store.db.close()
+        self.store = Store(self.path)
+        self.assertEqual(self.store.project(42)['concept'], 'Новая концепция без прежнего оформления')
+
+    def test_concept_consolidation_does_not_duplicate_existing_text(self):
+        self.store.configure(42, 'concept', 'Дружелюбный кот. Тёплые цвета.')
+        self.store.configure(42, 'tone', 'Дружелюбный кот.')
+        self.store.set_material(42, self.project, 'style', '/archive.png', 'Тёплые цвета.')
+        with self.store.transaction():
+            self.store.consolidate_project_concept(self.project)
+        self.assertEqual(self.store.project(42)['concept'], 'Дружелюбный кот. Тёплые цвета.')
+
     def test_delete_project_cleans_dependencies_and_preserves_other_projects(self):
         from publikot.oauth import OAuthManager
         from publikot.settings import Settings

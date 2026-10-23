@@ -79,6 +79,7 @@ def import_projects(source, store, source_owner, vk_owner):
                     for material in incoming.execute('SELECT * FROM project_materials WHERE project_id=?', (project['id'],)):
                         store.db.execute('INSERT INTO project_materials(project_id,kind,path,description) VALUES (?,?,?,?)',
                             (ident, material['kind'], material['path'], material['description']))
+                store.consolidate_project_concept(ident)
                 if 'project_members' in tables:
                     report['members_to_assign'] += incoming.execute(
                         'SELECT count(*) FROM project_members WHERE project_id=? AND user_id<>?', (project['id'], source_owner)).fetchone()[0]

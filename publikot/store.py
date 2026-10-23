@@ -126,6 +126,10 @@ class Store(PlatformStore):
             if not self.db.execute("SELECT 1 FROM schema_meta WHERE name='project_members_backfilled'").fetchone():
                 self.db.execute("INSERT OR IGNORE INTO project_members(project_id,user_id,role) SELECT id,owner,'member' FROM projects")
                 self.db.execute("INSERT INTO schema_meta VALUES ('project_members_backfilled')")
+            if not self.db.execute("SELECT 1 FROM schema_meta WHERE name='concept_consolidated'").fetchone():
+                for row in self.db.execute('SELECT id FROM projects').fetchall():
+                    self.consolidate_project_concept(row['id'])
+                self.db.execute("INSERT INTO schema_meta VALUES ('concept_consolidated')")
         self.init_platforms()
         for field, definition in (('image_count', 'INTEGER NOT NULL DEFAULT 1'),
                                   ('image_format', "TEXT NOT NULL DEFAULT 'square'")):
@@ -340,6 +344,18 @@ class Store(PlatformStore):
         self.require(actor, project_id)
         return self.db.execute('SELECT * FROM project_materials WHERE project_id=? AND kind=?',
                                (project_id, kind)).fetchone()
+
+    def consolidate_project_concept(self, project_id):
+        """One-time legacy import; retained style files are archive data, not AI inputs."""
+        project = self.db.execute('SELECT concept,tone,visual_style FROM projects WHERE id=?', (project_id,)).fetchone()
+        style = self.db.execute("SELECT description FROM project_materials WHERE project_id=? AND kind='style'", (project_id,)).fetchone()
+        concept = project['concept'] or ''
+        for label, value in (('Манера речи', project['tone']), ('Оформление', project['visual_style']),
+                             ('Пожелания к оформлению', style['description'] if style else '')):
+            value = (value or '').strip()
+            if value and value not in concept:
+                concept += ('\n\n' if concept else '') + label + ':\n' + value
+        self.db.execute("UPDATE projects SET concept=?,tone='',visual_style='' WHERE id=?", (concept, project_id))
 
     def set_material(self, actor, project_id, kind, path, description=''):
         self.require(actor, project_id)

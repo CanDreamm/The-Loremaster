@@ -48,7 +48,7 @@ def payload_summary(context, model):
             'system_prompt_chars': len(prompts.text),
             'system_prompt_sha256': hashlib.sha256(prompts.text.encode()).hexdigest(),
             'settings_present': {key: bool(project.get(key)) for key in
-                ('concept', 'tone', 'text_prompt', 'text_template', 'visual_style', 'image_prompt', 'image_template')},
+                ('concept', 'text_prompt', 'text_template', 'image_prompt', 'image_template')},
             'brief_chars': len(context['brief']), 'previous_chars': len(context['previous']),
             'feedback_chars': len(context['feedback']), 'references': references}
 

@@ -15,8 +15,8 @@ HELP = (
     'Публикот — помощник публикаций\n'
     '/menu — главное меню\n'
     '/id — ваш ID ВК\n/projects — назначенные проекты\n/select НОМЕР — выбрать\n'
-    '/settings — настройки\n/concept Описание\n/tone Тон общения\n'
-    '/textprompt Правила текста\n/imageprompt Правила картинки\n/style — одно фото визуального стиля с описанием\n'
+    '/settings — настройки\n/concept Описание, манера речи и оформление проекта\n'
+    '/textprompt Правила текста\n/imageprompt Правила картинки\n'
     '/vk НОМЕР — сообщество для публикаций\n'
     '/browser vk ССЫЛКА — публикация ВК через браузер\n'
     '/browser dzen ССЫЛКА — публикация статьи в Дзен через браузер\n'
@@ -300,7 +300,9 @@ class VkBot(BotMenus):
                 raise Conflict('OAuth не настроен. Ключи из .env.python отключаются на сервере.')
             self.oauth.disconnect(actor, project['id'])
             return await self.client.send(peer, 'OAuth-ключ проекта удалён с сервера. При необходимости отзовите доступ приложению также в настройках ВК.')
-        fields = {'/concept': 'concept', '/tone': 'tone', '/textprompt': 'text_prompt', '/imageprompt': 'image_prompt'}
+        if command in ('/tone', '/style'):
+            raise Conflict('Тон и оформление теперь задаются в концепции проекта: /concept или «Настройки проекта → Концепция».')
+        fields = {'/concept': 'concept', '/textprompt': 'text_prompt', '/imageprompt': 'image_prompt'}
         if command in fields:
             if not args or len(args) > 12000:
                 raise Conflict('Введите значение после команды. Один дефис очищает настройку.')
@@ -316,7 +318,7 @@ class VkBot(BotMenus):
             return await self.menu(actor, peer, {'screen': 'settings', 'project': s.project(actor)['id']})
         if command in ('/reference', '/references'):
             raise Conflict('Референсы проекта убраны. Прикрепите фото к заданию /post и опишите, что с ним сделать.')
-        if command in ('/style', '/character', '/characters'):
+        if command in ('/character', '/characters'):
             project = s.project(actor)
             if command == '/characters':
                 return await self.project_images(actor, peer, project['id'], 'characters')
@@ -325,9 +327,8 @@ class VkBot(BotMenus):
             image = await self.photo(message, 'materials')
             if not image:
                 raise Conflict('Прикрепите одну фотографию. Описание можно добавить в подписи.')
-            kind = 'style' if command == '/style' else 'character'
-            s.set_material(actor, project['id'], kind, image, args)
-            return await self.project_images(actor, peer, project['id'], 'style' if kind == 'style' else 'characters')
+            s.set_material(actor, project['id'], 'character', image, args)
+            return await self.project_images(actor, peer, project['id'], 'characters')
         if command in ('/post', '/revise', '/resume'):
             return await self.generate(actor, peer, command, args, message)
         if command == '/image':
@@ -382,7 +383,7 @@ class VkBot(BotMenus):
                 if command == '/revise' and job['generation_context']:
                     original = json.loads(job['generation_context'])['project']
                     project.update({key: original[key] for key in ('image_count', 'image_format')})
-                materials = [s.material(actor, project['id'], kind) for kind in ('style', 'character')]
+                materials = [s.material(actor, project['id'], 'character')]
                 context = {'project': project, 'materials': [dict(m) for m in materials if m],
                            'brief': brief, 'previous': previous, 'feedback': feedback,
                            'reference': job['reference_path']}

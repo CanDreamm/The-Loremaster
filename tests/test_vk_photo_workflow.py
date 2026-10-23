@@ -70,7 +70,7 @@ class VkPhotoWorkflow(unittest.IsolatedAsyncioTestCase):
                         images = [p['image_url']['url'] for p in payload['messages'][1]['content'] if p['type'] == 'image_url']
                     else:
                         images = payload['image_urls']
-                    self.assertEqual(len(images), 3)
+                    self.assertEqual(len(images), 2)
                     for uri in images:
                         self.assertEqual(base64.b64decode(uri.split(',', 1)[1]), PNG)
                     return web.json_response({'request_id': len(payloads)})
@@ -124,11 +124,10 @@ class VkPhotoWorkflow(unittest.IsolatedAsyncioTestCase):
                         await bot.handle({'group_id': 123, 'type': 'message_event', 'object': {
                             'user_id': 42, 'peer_id': 42, 'event_id': 'settings-callback',
                             'payload': {'action': 'menu', 'screen': 'settings', 'project': store.project(42)['id']}}})
-                        await send('/concept Добрый персонаж')
-                        await send('/style Мягкий свет', photo=True)
+                        await send('/concept Добрый персонаж. Мягкий свет')
                         await send('/character Узнаваемая внешность', photo=True)
                         project = store.project(42)
-                        for kind in ('style', 'character'):
+                        for kind in ('character',):
                             material = store.material(42, project['id'], kind)
                             self.assertEqual(Path(material['path']).read_bytes(), PNG)
                         store.configure(42, 'image_count', 3)

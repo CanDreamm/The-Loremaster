@@ -8,8 +8,8 @@ from .platform_menus import PlatformMenus, SCREENS as PLATFORM_SCREENS
 
 
 SHORT_PROMPT = 'Пиши короткий пост до 500 символов. Верни только готовый текст.'
-PROJECT_FIELDS = {'concept': 'Концепция', 'tone': 'Тон общения',
-                  'text_prompt': 'Правила для текста', 'visual_style': 'Визуальный стиль',
+PROJECT_FIELDS = {'concept': 'Концепция',
+                  'text_prompt': 'Правила для текста',
                   'image_prompt': 'Правила изображения',
                   'text_template': 'Промпт для текста', 'image_template': 'Промпт для изображения'}
 
@@ -108,11 +108,13 @@ class BotMenus(PlatformMenus):
             previous = button('Назад', 'admin')
         elif kind in ('add_group', 'add_key'):
             previous = button('Назад', 'communities' if kind == 'add_group' else 'add')
-        elif kind in ('style', 'character'):
-            previous = button('Назад', 'style' if kind == 'style' else 'characters', project=project_id)
+        elif kind == 'style':
+            raise Conflict('Оформление теперь задаётся в концепции проекта. Откройте настройки заново.')
+        elif kind == 'character':
+            previous = button('Назад', 'characters', project=project_id)
         elif kind == 'field':
-            if state['field'] == 'visual_style':
-                raise Conflict('Визуальный стиль теперь задаётся одним фото с подписью. Откройте настройки проекта заново.')
+            if state['field'] not in PROJECT_FIELDS:
+                raise Conflict('Тон и оформление теперь задаются в концепции проекта. Откройте настройки заново.')
             previous = button('Назад', 'field', project=project_id, field=state['field'])
         elif kind in ('revise', 'image', 'ai_image'):
             previous = button('Назад к тексту', 'job', project=project_id, job=state['job'])
@@ -225,8 +227,7 @@ class BotMenus(PlatformMenus):
                     label = '✅ ' + label
                 return button(label, target, project=project_id)
 
-            rows = [[field_button('concept'), field_button('tone')],
-                    [field_button('text_prompt'), material_button('Визуальный стиль', 'style', 'style')],
+            rows = [[field_button('concept'), field_button('text_prompt')],
                     [material_button('Персонажи', 'character', 'characters')],
                     [button('Генерация изображений', 'image_options', project=project_id)],
                     [field_button('text_template'), field_button('image_template')],
@@ -236,10 +237,10 @@ class BotMenus(PlatformMenus):
             return await self.client.send(peer, f"Настройки проекта: {p['name']}\nВыберите раздел.", keyboard=keyboard(*rows))
         if screen in ('field', 'field_add'):
             field = payload['field']
+            if field in ('tone', 'visual_style'):
+                raise Conflict('Тон и оформление теперь задаются в концепции проекта. Откройте настройки заново.')
             if field not in PROJECT_FIELDS:
                 raise Conflict('Неизвестная настройка проекта.')
-            if field == 'visual_style':
-                return await self.menu(actor, peer, {'screen': 'style', 'project': project_id})
             if screen == 'field':
                 value = p[field] or ('Не задано. По умолчанию: ' + SHORT_PROMPT if field == 'text_prompt' else 'Не задано.')
                 return await self.client.send(peer, f"{PROJECT_FIELDS[field]} · {p['name']}\n\n{value}", keyboard=keyboard(
@@ -305,14 +306,13 @@ class BotMenus(PlatformMenus):
             await self.client.send(peer, 'Промпт для текста:\n\n' + version['text_prompt'])
             return await self.client.send(peer, 'Промпт для изображения:\n\n' + version['image_prompt'],
                 keyboard=keyboard([button('Назад', 'job', project=project_id, job=job['id'])]))
-        if screen in ('style', 'characters'):
+        if screen in ('style', 'style_add'):
+            raise Conflict('Оформление теперь задаётся в концепции проекта. Откройте настройки заново.')
+        if screen == 'characters':
             return await self.project_images(actor, peer, project_id, screen, int(payload.get('page', 0)))
-        if screen in ('style_add', 'character'):
-            kind = 'style' if screen == 'style_add' else 'character'
-            hint = ('Прикрепите одну фотографию визуального стиля.' if kind == 'style'
-                    else 'Прикрепите одну фотографию персонажей.')
-            return await self.prompt(actor, peer, {'kind': kind, 'project': project_id},
-                                     hint + ' Описание можно добавить в подписи. Новое фото заменит предыдущее.')
+        if screen == 'character':
+            return await self.prompt(actor, peer, {'kind': 'character', 'project': project_id},
+                'Прикрепите одну фотографию персонажей. Описание можно добавить в подписи. Новое фото заменит предыдущее.')
         if screen in ('references', 'reference'):
             raise Conflict('Раздел «Референсы» убран. Фото-референс можно приложить к заданию публикации.')
         raise Conflict('Неизвестное меню. Откройте /menu.')
@@ -320,16 +320,15 @@ class BotMenus(PlatformMenus):
     async def project_images(self, actor, peer, project_id, screen, page=0):
         project = self.store.require(actor, project_id)
         self.store.select(actor, project_id)
-        style = screen == 'style'
-        row = self.store.material(actor, project_id, 'style' if style else 'character')
+        if screen != 'characters':
+            raise Conflict('Оформление теперь задаётся в концепции проекта.')
+        row = self.store.material(actor, project_id, 'character')
         if row:
             await self.client.send_photo(peer, row['path'], row['description'])
-        title = 'Визуальный стиль' if style else 'Персонажи'
+        title = 'Персонажи'
         state = 'Сохранено одно фото. Новое фото заменит его.' if row else 'Пока ничего не добавлено.'
-        if style and project['visual_style']:
-            state += '\nОписание стиля: ' + project['visual_style']
         await self.client.send(peer, f"{title} · {project['name']}\n{state}", keyboard=keyboard(
-            [button('Добавить', 'style_add' if style else 'character', project=project_id)],
+            [button('Добавить', 'character', project=project_id)],
             [button('Назад', 'settings', project=project_id)]))
 
     @staticmethod
@@ -416,12 +415,16 @@ class BotMenus(PlatformMenus):
         elif kind == 'field':
             if not text or len(text) > 12000:
                 raise Conflict('Отправьте значение до 12000 символов.')
-            if state['field'] == 'visual_style':
-                raise Conflict('Визуальный стиль теперь задаётся одним фото с подписью. Откройте настройки проекта заново.')
+            if state['field'] not in PROJECT_FIELDS:
+                self.store.set_dialog(actor, None)
+                raise Conflict('Тон и оформление теперь задаются в концепции проекта. Откройте настройки заново.')
             self.store.configure(actor, state['field'], '' if text == '-' else text)
             self.store.set_dialog(actor, None)
             await self.menu(actor, peer, {'screen': 'field', 'field': state['field'], 'project': project_id})
-        elif kind in ('style', 'character'):
+        elif kind == 'style':
+            self.store.set_dialog(actor, None)
+            raise Conflict('Оформление теперь задаётся в концепции проекта. Откройте настройки заново.')
+        elif kind == 'character':
             if len(text) > 4000:
                 raise Conflict('Подпись к изображению должна быть не длиннее 4000 символов.')
             image = await self.photo(message, 'materials')
@@ -429,7 +432,7 @@ class BotMenus(PlatformMenus):
                 raise Conflict('Прикрепите изображение.')
             self.store.set_material(actor, project_id, kind, image, text)
             self.store.set_dialog(actor, None)
-            await self.project_images(actor, peer, project_id, 'style' if kind == 'style' else 'characters')
+            await self.project_images(actor, peer, project_id, 'characters')
         elif kind == 'admin':
             await self.command(actor, peer, state['command'], text, message)
             self.store.set_dialog(actor, None)

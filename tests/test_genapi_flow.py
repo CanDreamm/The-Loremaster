@@ -95,7 +95,7 @@ class GenAPIWholeStack(unittest.IsolatedAsyncioTestCase):
                                 self.assertIn('Тёплый разговорный тон', data['messages'][0]['content'])
                                 self.assertIn('Материал character', data['messages'][0]['content'])
                                 self.assertEqual(len([c for c in data['messages'][1]['content'] if c['type'] == 'image_url']),
-                                                 3 if 'Замечания' in data['messages'][0]['content'] else 2)
+                                                 2 if 'Замечания' in data['messages'][0]['content'] else 1)
                                 for block in data['messages'][1]['content']:
                                     if block['type'] == 'image_url':
                                         self.assertEqual(base64.b64decode(block['image_url']['url'].split(',', 1)[1]), PNG)
@@ -110,7 +110,7 @@ class GenAPIWholeStack(unittest.IsolatedAsyncioTestCase):
                                 self.assertIn('не рисуй надписей', data['prompt'])
                                 self.assertNotIn(ARTICLE, data['prompt'])
                                 self.assertLessEqual(len(data['prompt']), 2400)
-                                self.assertEqual(len(data['image_urls']), 3 if 'Замечания' in data['prompt'] else 2)
+                                self.assertEqual(len(data['image_urls']), 2 if 'Замечания' in data['prompt'] else 1)
                                 self.assertEqual((data['num_images'], data['max_images']), (1, 1))
                                 self.assertEqual((data['width'], data['height']), (1024, 1024))
                                 for uri in data['image_urls']:
@@ -206,8 +206,7 @@ class GenAPIWholeStack(unittest.IsolatedAsyncioTestCase):
                         project = store.project(42)['id']
                         await bot.command(42, 42, '/allow', '99', {})
                         await bot.command(42, 42, '/assign', f'{project} 99', {})
-                        store.configure(42, 'concept', 'Характер кота: добрый рассказчик')
-                        store.configure(42, 'tone', 'Тёплый разговорный тон')
+                        store.configure(42, 'concept', 'Характер кота: добрый рассказчик. Тёплый разговорный тон')
                         store.configure(42, 'text_prompt', 'Статья 6000 знаков, от первого лица')
                         store.configure(42, 'image_prompt', 'Палитра: оранжевая; не рисуй надписей')
                         await bot.menu(42, 42, {'screen': 'image_count', 'project': project, 'count': 3})
