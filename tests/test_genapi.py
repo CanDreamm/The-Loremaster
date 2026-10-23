@@ -163,6 +163,7 @@ class GenAPITests(unittest.IsolatedAsyncioTestCase):
             (self.job, json.dumps({'result': ['https://cdn.example/saved.png']}), str(self.ref)))
         client = SimpleNamespace(send=AsyncMock(), send_photo=AsyncMock())
         bot = VkBot(self.settings, self.store, client, text_ai=self.ai, image_ai=self.ai)
+        self.store.db.execute('UPDATE jobs SET image_brief=? WHERE id=?', ('IMAGE_TASK_ONLY', self.job))
         await bot.generate_images(42, 42, self.job, 1)
         self.session.request.assert_not_called()
         self.assertIn('новую оплату', client.send.call_args.args[1])
@@ -191,6 +192,7 @@ class GenAPITests(unittest.IsolatedAsyncioTestCase):
         self.session.get.return_value = response()
         bot = VkBot(self.settings, self.store, SimpleNamespace(send=AsyncMock(), send_photo=AsyncMock()),
                     text_ai=self.ai, image_ai=self.ai)
+        self.store.db.execute('UPDATE jobs SET image_brief=? WHERE id=?', ('IMAGE_TASK_ONLY', self.job))
         await bot.action(42, 42, {'action': 'newimages', 'job': self.job, 'revision': 2})
         images = version_images(self.store.revision(42, self.job))
         self.assertEqual(len(images), 1)
@@ -311,12 +313,14 @@ class GenAPITests(unittest.IsolatedAsyncioTestCase):
         self.session.get.return_value = response()
         bot = VkBot(self.settings, self.store, SimpleNamespace(send=AsyncMock(), send_photo=AsyncMock()),
                     text_ai=self.ai, image_ai=self.ai)
+        self.store.db.execute('UPDATE jobs SET image_brief=? WHERE id=?', ('IMAGE_TASK_ONLY', self.job))
         await bot.generate_images(42, 42, self.job, 1)
         posted = self.session.request.call_args_list[0]
         self.assertTrue(posted.args[1].endswith('/seedream-v5-lite'))
         parts = posted.kwargs['data']._fields
         actual_prompt = next(value for options, headers, value in parts if options['name'] == 'prompt')
-        self.assertIn('ORIGINAL_USER_TASK', actual_prompt)
+        self.assertIn('IMAGE_TASK_ONLY', actual_prompt)
+        self.assertNotIn('ORIGINAL_USER_TASK', actual_prompt)
         self.assertIn('USER_CONCEPT', actual_prompt)
         self.assertIn('CHARACTER_DESCRIPTION', actual_prompt)
         for forbidden in ('GENERATED_ARTICLE_SECRET', 'PREVIOUS_ARTICLE_SECRET', 'TEXT_CORRECTION_SECRET',

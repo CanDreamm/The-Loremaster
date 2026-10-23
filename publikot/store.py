@@ -3,7 +3,7 @@ import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
 
-from .prompts import TEXT_TEMPLATE, IMAGE_TEMPLATE
+from .prompts import TEXT_TEMPLATE, IMAGE_TEMPLATE, LEGACY_TEXT_TEMPLATE, LEGACY_IMAGE_TEMPLATE
 
 
 class Conflict(Exception):
@@ -96,6 +96,9 @@ class Store(PlatformStore):
             if field not in columns:
                 default = template.replace("'", "''")
                 self.db.execute(f"ALTER TABLE projects ADD COLUMN {field} TEXT NOT NULL DEFAULT '{default}'")
+        for field, legacy, current in (('text_template', LEGACY_TEXT_TEMPLATE, TEXT_TEMPLATE),
+                                       ('image_template', LEGACY_IMAGE_TEMPLATE, IMAGE_TEMPLATE)):
+            self.db.execute(f'UPDATE projects SET {field}=? WHERE {field}=?', (current, legacy))
         # Existing projects keep their API connection until explicitly switched.
         for table in ('projects', 'jobs'):
             target_columns = {r['name'] for r in self.db.execute(f'PRAGMA table_info({table})')}
@@ -141,6 +144,9 @@ class Store(PlatformStore):
                 self.db.execute(f"ALTER TABLE {table} ADD COLUMN image_paths TEXT NOT NULL DEFAULT '[]'")
         if 'generation_context' not in {r['name'] for r in self.db.execute('PRAGMA table_info(jobs)')}:
             self.db.execute("ALTER TABLE jobs ADD COLUMN generation_context TEXT NOT NULL DEFAULT ''")
+        for field in ('image_brief', 'image_reference_path'):
+            if field not in {r['name'] for r in self.db.execute('PRAGMA table_info(jobs)')}:
+                self.db.execute(f"ALTER TABLE jobs ADD COLUMN {field} TEXT NOT NULL DEFAULT ''")
         if 'restored_job_id' not in {r['name'] for r in self.db.execute('PRAGMA table_info(jobs)')}:
             self.db.execute('ALTER TABLE jobs ADD COLUMN restored_job_id INTEGER')
         self.db.execute('''CREATE TABLE IF NOT EXISTS ai_requests (
@@ -566,7 +572,7 @@ class Store(PlatformStore):
             old = dict(self.revision(actor, ident))
             new = self.next_id('jobs')
             fields = ('project_id', 'brief', 'image_path', 'target_group', 'reference_path',
-                      'publish_mode', 'browser_target', 'destinations', 'image_paths', 'generation_context')
+                      'publish_mode', 'browser_target', 'destinations', 'image_paths', 'generation_context', 'image_brief', 'image_reference_path')
             self.db.execute('INSERT INTO jobs(id,owner,status,' + ','.join(fields) + ') VALUES (?, ?, \'review\','
                             + ','.join('?' for _ in fields) + ')', (new, actor, *(job[f] for f in fields)))
             fields = ('body', 'is_demo', 'image_path', 'text_prompt', 'image_prompt', 'prompt_materials', 'image_paths')

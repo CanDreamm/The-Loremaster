@@ -148,6 +148,7 @@ class VkPhotoWorkflow(unittest.IsolatedAsyncioTestCase):
                         await bot.handle({'group_id': 123, 'type': 'message_event', 'object': {
                             'user_id': 42, 'peer_id': 42, 'event_id': 'images-callback',
                             'payload': {'action': 'generateimages', 'job': job['id'], 'revision': 1}}})
+                        await send('Покажи персонажа у кофейни')
                         self.assertEqual(len(version_images(store.revision(42, job['id']))), 3)
                         self.assertEqual(len(payloads), 4)
                         self.assertIn('messages.sendMessageEventAnswer', calls)

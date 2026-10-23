@@ -27,7 +27,7 @@ HELP = (
     '/revise Замечания — исправить текст\n/image НОМЕР — заменить картинку приложенным фото\n'
     '/jobs — задания проекта\n/job НОМЕР — открыть задание\n/status — текущее задание\n'
     'Текст и изображения создаются через GenAPI с настройками проекта. '
-    'После согласования текста нажмите «Создать изображения». Количество 0–3 задаётся в настройках. '
+    'После согласования текста нажмите «Создать изображение» и отправьте отдельное задание. Количество 0–3 задаётся в настройках. '
     '/resume — проверить прерванную генерацию текста без повторного платного запроса. '
     'Референс не публикуется автоматически.'
 )
@@ -43,7 +43,7 @@ def preview_keyboard(job, is_demo=False):
     context = json.loads(job.get('generation_context') or '{}')
     count = context.get('project', {}).get('image_count', 0)
     if not is_demo and count:
-        rows.append([button('Создать / проверить изображения', 'generateimages')])
+        rows.append([button('Создать изображение', 'generateimages')])
         for slot in range(len(version_images(job))):
             rows.append([button(f'Изменить изображение {slot + 1}', f'regenimage{slot}')])
     rows.append(([button('Опубликовать', 'publish', 'positive')] if not is_demo and len(version_images(job)) >= count and (job.get('destinations', '[]') != '[]' if job.get('publish_mode') == 'platforms' else job['target_group'] or job.get('browser_target')) else [])
@@ -394,7 +394,7 @@ class VkBot(BotMenus):
                              (json.dumps(context, ensure_ascii=False), ident))
             project, materials = context['project'], context['materials']
             brief, previous, feedback = context['brief'], context['previous'], context['feedback']
-            prompts = build_prompts(project, brief, materials, context['reference'], previous, feedback)
+            prompts = build_prompts(project, brief, materials, context['reference'], previous, feedback, image_brief=job['image_brief'])
             await self.client.send(peer, 'Формирую промпты и готовлю текст. Без подтверждения пост не публикуется.')
             options = {'materials': prompts.materials, 'request_key': (actor, ident, revision)} if isinstance(self.text_ai, GenAPI) else {}
             body = await self.text_ai.generate(project['concept'], brief, previous, feedback, prompt=prompts.text, **options)
@@ -416,6 +416,10 @@ class VkBot(BotMenus):
         count = project['image_count']
         if not count:
             raise Conflict('В настройках этого задания выбрано 0 изображений.')
+        if not job['image_brief']:
+            return await self.prompt(actor, peer, {'kind': 'image_task', 'project': job['project_id'],
+                'job': ident, 'revision': revision, 'slot': slot, 'feedback': feedback},
+                'Что изобразить? Отправьте задание для изображения. Можно приложить фото предмета или референс.')
         images = version_images(old)
         if slot is not None and not 0 <= slot < len(images):
             raise Conflict('Изображение не найдено.')
@@ -437,9 +441,12 @@ class VkBot(BotMenus):
             await self.client.send(peer, 'Создаю изображения по заданию, концепции проекта и фото персонажей. Это может занять несколько минут.')
             # Rebuild even legacy drafts: their saved image_prompt can contain the generated article.
             source_materials = context.get('materials', json.loads(old['prompt_materials'] or '[]'))
-            base_prompt = build_image_prompt(project, context.get('brief', job['brief']), source_materials)
+            base_prompt = build_image_prompt(project, job['image_brief'], source_materials)
             materials = [{'role': 'character', 'path': m['path']} for m in source_materials
                          if m and m.get('kind', m.get('role')) == 'character']
+            if job['image_reference_path']:
+                materials.append({'role': 'reference', 'path': job['image_reference_path']})
+                base_prompt += '\n\nДополнительный референс: фото из задания для изображения.'
             for index in slots:
                 prompt = base_prompt + f'\n\nИллюстрация {index + 1} из {count}. '
                 prompt += 'Выбери сцену по заданию пользователя; сохрани общих персонажей, стиль и палитру концепции. '

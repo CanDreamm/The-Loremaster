@@ -116,7 +116,7 @@ class BotMenus(PlatformMenus):
             if state['field'] not in PROJECT_FIELDS:
                 raise Conflict('Тон и оформление теперь задаются в концепции проекта. Откройте настройки заново.')
             previous = button('Назад', 'field', project=project_id, field=state['field'])
-        elif kind in ('revise', 'image', 'ai_image'):
+        elif kind in ('revise', 'image', 'ai_image', 'image_task'):
             previous = button('Назад к тексту', 'job', project=project_id, job=state['job'])
         else:
             previous = back(project_id)[0]
@@ -373,7 +373,7 @@ class BotMenus(PlatformMenus):
         project_id = state.get('project')
         if project_id:
             self.store.require(actor, project_id)
-            if kind not in ('revise', 'image', 'ai_image'):
+            if kind not in ('revise', 'image', 'ai_image', 'image_task'):
                 self.store.select(actor, project_id)
         if kind == 'browser_name':
             if not text or len(text) > 100:
@@ -395,6 +395,21 @@ class BotMenus(PlatformMenus):
             await self.client.send(peer, 'Сообщество сохранено. Можно сразу готовить тексты. Для публикаций подключите ВК.',
                 keyboard=keyboard([button('Подключить ВК', 'authorize', project=project_id)],
                                   [button('Написать пост', 'compose', project=project_id)], back(project_id)))
+        elif kind == 'image_task':
+            if not text or len(text) > 12000:
+                raise Conflict('Отправьте задание для изображения до 12000 символов.')
+            self.store.expect_review(actor, state['job'], state['revision'])
+            reference = await self.photo(message, 'images')
+            # Recheck after downloading: another participant may have changed the draft.
+            with self.store.transaction():
+                job = self.store.expect_review(actor, state['job'], state['revision'])
+                if job['image_brief']:
+                    raise Conflict('Задание для изображения уже сохранено. Откройте черновик заново.')
+                self.store.db.execute('UPDATE jobs SET image_brief=?, image_reference_path=? WHERE id=?',
+                                      (text, reference or '', state['job']))
+            self.store.set_dialog(actor, None)
+            await self.generate_images(actor, peer, state['job'], state['revision'],
+                                       state.get('slot'), state.get('feedback', ''))
         elif kind == 'ai_image':
             if not text or len(text) > 4000:
                 raise Conflict('Отправьте замечания к изображению до 4000 символов.')

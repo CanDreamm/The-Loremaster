@@ -23,6 +23,29 @@ class StoreTests(unittest.TestCase):
         self.store.save_version(42, ident, 1, 'Текст', demo)
         return ident
 
+    def test_default_templates_update_but_custom_templates_and_image_tasks_survive_restart(self):
+        from publikot.prompts import (TEXT_TEMPLATE, IMAGE_TEMPLATE,
+                                      LEGACY_TEXT_TEMPLATE, LEGACY_IMAGE_TEMPLATE)
+        custom = self.store.create_project(42, 'Custom')
+        self.store.db.execute('UPDATE projects SET text_template=?, image_template=? WHERE id=?',
+                             ('Custom text', 'Custom image', custom))
+        self.store.db.execute('UPDATE projects SET text_template=?, image_template=? WHERE id=?',
+                             (LEGACY_TEXT_TEMPLATE, LEGACY_IMAGE_TEMPLATE, self.project))
+        self.store.select(42, self.project)
+        job = self.draft()
+        self.store.db.execute('UPDATE jobs SET image_brief=?, image_reference_path=? WHERE id=?',
+                             ('Separate image task', '/image-ref.png', job))
+        self.store.set_dialog(42, {'kind': 'image_task', 'project': self.project, 'job': job, 'revision': 1})
+        self.store.db.close()
+        self.store = Store(self.path)
+        self.assertEqual(self.store.require(42, self.project)['text_template'], TEXT_TEMPLATE)
+        self.assertEqual(self.store.require(42, self.project)['image_template'], IMAGE_TEMPLATE)
+        self.assertEqual(self.store.require(42, custom)['text_template'], 'Custom text')
+        self.assertEqual(self.store.require(42, custom)['image_template'], 'Custom image')
+        self.assertEqual(self.store.job(42, job)['image_brief'], 'Separate image task')
+        self.assertEqual(self.store.job(42, job)['image_reference_path'], '/image-ref.png')
+        self.assertEqual(self.store.dialog(42)['kind'], 'image_task')
+
     def test_legacy_tone_and_style_migrate_to_concept_once_without_losing_files_or_drafts(self):
         self.store.configure(42, 'concept', 'Истории рыжего кота')
         self.store.configure(42, 'tone', 'Разговорная речь')

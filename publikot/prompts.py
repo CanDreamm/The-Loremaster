@@ -3,7 +3,7 @@ from dataclasses import dataclass
 import re
 
 
-TEXT_TEMPLATE = """Создай публикацию на основе моего сообщения и приложенных материалов.
+LEGACY_TEXT_TEMPLATE = """Создай публикацию на основе моего сообщения и приложенных материалов.
 
 Учитывай весь контекст проекта: концепцию, тон общения, правила текста, визуальный стиль и персонажей, а также дополнительные референсы.
 
@@ -13,7 +13,7 @@ TEXT_TEMPLATE = """Создай публикацию на основе моег�
 
 Выдай только готовую публикацию."""
 
-IMAGE_TEMPLATE = """Создай изображение на основе моего сообщения и приложенных материалов.
+LEGACY_IMAGE_TEMPLATE = """Создай изображение на основе моего сообщения и приложенных материалов.
 
 Учитывай весь контекст проекта: концепцию, тон общения, правила текста, визуальный стиль и персонажей, а также дополнительные референсы.
 
@@ -24,6 +24,15 @@ IMAGE_TEMPLATE = """Создай изображение на основе мое
 Все элементы должны выглядеть естественно и принадлежать одному миру. Не перегружай изображение деталями и не добавляй лишнего. При противоречиях ориентируйся на правила проекта и моё текущее задание.
 
 Сразу создавай готовое изображение."""
+
+
+TEXT_TEMPLATE = "Создай публикацию на основе моего сообщения и приложенных материалов. Учитывай весь контекст проекта: концепцию, правила текста, персонажей и дополнительные референсы. Представь, какой человек мог бы стоять за этим проектом: его характер, мышление, вкус, чувство юмора и манеру общения. Пиши так, будто именно этот человек решил поделиться моей идеей. Не пересказывай задание буквально. Сам найди интересную подачу, соблюдай правила проекта и не придумывай неподтверждённых фактов. Текст должен быть живым, естественным, без шаблонов и ощущения, что его написал ИИ. Выдай только готовую публикацию."
+IMAGE_TEMPLATE = "Создай изображение на основе задания, концепции, правил изображения и приложенных материалов. Если приложено фото предмета, сохрани его узнаваемые особенности. Если приложены референсы, учитывай их содержание, детали и настроение, адаптируя к стилю проекта. Сразу создавай готовое изображение."
+
+
+def current_template(value, image=False):
+    legacy, current = (LEGACY_IMAGE_TEMPLATE, IMAGE_TEMPLATE) if image else (LEGACY_TEXT_TEMPLATE, TEXT_TEMPLATE)
+    return current if value == legacy else value
 
 
 @dataclass(frozen=True)
@@ -59,14 +68,14 @@ def build_image_prompt(project, brief, materials=()):
         ('\nОписание: ' + m.get('description', '') if m.get('description') else '')
         for m in materials if m and m.get('kind', m.get('role')) == 'character')
     return '\n\n'.join(filter(None, (
-        project['image_template'],
+        current_template(project['image_template'], image=True),
         'Концепция проекта:\n' + project['concept'] if project.get('concept') else '',
         'Правила изображения:\n' + project['image_prompt'] if project.get('image_prompt') else '',
         characters, 'Задание пользователя:\n' + brief,
     )))
 
 
-def build_prompts(project, brief, materials=(), reference_path=None, previous='', feedback='', body=''):
+def build_prompts(project, brief, materials=(), reference_path=None, previous='', feedback='', body='', image_brief=''):
     context = '\n\n'.join(f'{label}:\n{project[key]}' for key, label in (
         ('concept', 'Концепция проекта'), ('text_prompt', 'Правила для текста'),
     ) if project.get(key))
@@ -86,12 +95,12 @@ def build_prompts(project, brief, materials=(), reference_path=None, previous=''
                             'Что с ним сделать, указано в сообщении пользователя.')
     material_context = '\n\n'.join(descriptions)
     text = '\n\n'.join(filter(None, (
-        project['text_template'],
+        current_template(project['text_template']),
         context, material_context, 'Задание пользователя:\n' + brief,
         'Предыдущий текст:\n' + previous if previous else '',
         'Исправления текста:\n' + feedback if feedback else '',
         text_volume_policy(project, brief, feedback),
     )))
     # body is accepted for compatibility; generated publication text is never an image input.
-    image = build_image_prompt(project, brief, materials)
+    image = build_image_prompt(project, image_brief, materials)
     return PublicationPrompts(text, image, inputs)

@@ -106,7 +106,8 @@ class GenAPIWholeStack(unittest.IsolatedAsyncioTestCase):
                                 self.assertIn('не рисуй надписей', data['prompt'])
                                 self.assertNotIn(ARTICLE, data['prompt'])
                                 self.assertIn('ДЕТАЛЬ КОНЦЕПЦИИ ' * 300, data['prompt'])
-                                self.assertIn('Расскажи, как открылась кофейня', data['prompt'])
+                                self.assertIn('Изобрази открытие кофейни', data['prompt'])
+                                self.assertNotIn('Расскажи, как открылась кофейня', data['prompt'])
                                 self.assertIn('Материал character', data['prompt'])
                                 self.assertEqual(len(data['image_urls']), 2 if 'Замечания' in data['prompt'] else 1)
                                 self.assertTrue(route.endswith('/gpt-image-2-5'))
@@ -232,6 +233,7 @@ class GenAPIWholeStack(unittest.IsolatedAsyncioTestCase):
                             await bot.action(99, 99, {'action': 'publish', 'job': job['id'], 'revision': 1})
                         # Simulate a lost poll: request ID survives and the next click resumes it.
                         fail_next_poll = True
+                        store.db.execute('UPDATE jobs SET image_brief=? WHERE id=?', ('Изобрази открытие кофейни', job['id']))
                         with self.assertRaises(ProviderError):
                             await bot.generate_images(99, 99, job['id'], 1)
                         self.assertEqual(store.job(99)['status'], 'review')

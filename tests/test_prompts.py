@@ -51,7 +51,7 @@ class TextVolumeTests(unittest.TestCase):
         project = {**self.project, 'concept': 'Концепция персонажа', 'text_prompt': 'TEXT_ONLY_RULE'}
         prompts = build_prompts(project, 'Исходное задание', reference_path='/task-photo.png',
             previous='PREVIOUS_GENERATED_TEXT', feedback='TEXT_CORRECTION', body='NEW_GENERATED_TEXT')
-        self.assertIn('Исходное задание', prompts.image)
+        self.assertNotIn('Исходное задание', prompts.image)
         self.assertIn('Концепция персонажа', prompts.image)
         for excluded in ('TEXT_ONLY_RULE', 'PREVIOUS_GENERATED_TEXT', 'TEXT_CORRECTION',
                          'NEW_GENERATED_TEXT', 'Дополнительный референс'):

@@ -1,3 +1,4 @@
+from types import SimpleNamespace
 import json
 import tempfile
 import unittest
@@ -244,7 +245,8 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
         for prompt in (old['text_prompt'], old['image_prompt']):
             self.assertIn('Проверяемая концепция', prompt)
             self.assertIn('Проверяемый тон', prompt)
-            self.assertIn('Текущее задание', prompt)
+        self.assertIn('Текущее задание', old['text_prompt'])
+        self.assertNotIn('Текущее задание', old['image_prompt'])
         self.store.configure(42, 'text_template', 'Следующий промпт')
         self.assertEqual(self.store.revision(42, job['id'])['text_prompt'], old['text_prompt'])
 
@@ -348,7 +350,9 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.app.text_ai.generate.call_args.kwargs['prompt'], version['text_prompt'])
         for value in ('Кофейня', 'Дружелюбно', 'Акварель', 'Рыжий кот', 'замени фон на синий'):
             self.assertIn(value, version['text_prompt'])
-            self.assertIn(value, version['image_prompt'])
+            if value != 'замени фон на синий':
+                self.assertIn(value, version['image_prompt'])
+        self.assertNotIn('замени фон на синий', version['image_prompt'])
         self.assertIn('Без эмодзи', version['text_prompt'])
         self.assertNotIn('Без эмодзи', version['image_prompt'])
         self.assertIn('Квадратный формат', version['image_prompt'])
@@ -368,6 +372,30 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(replaced['prompt_materials'], current['prompt_materials'])
         self.assertTrue(replaced['image_path'])
         self.assertEqual(self.store.job(42)['reference_path'], job['reference_path'])
+
+    async def test_separate_image_task_is_requested_after_text_and_kept_for_retry(self):
+        await self.setup_project()
+        self.app.settings = replace(self.settings, demo=False)
+        self.app.text_ai.generate = AsyncMock(return_value='GENERATED_TEXT_SECRET')
+        self.app.image_ai = SimpleNamespace(generate_image=AsyncMock(return_value='/generated.png'))
+        await self.send('/post TEXT_TASK_SECRET', photo=True)
+        job = self.store.job(42)
+        await self.click('Создать изображение')
+        self.app.image_ai.generate_image.assert_not_awaited()
+        self.assertEqual(self.store.dialog(42)['kind'], 'image_task')
+        await self.send('IMAGE_TASK_ONLY', photo=True)
+        saved = self.store.job(42)
+        self.assertEqual(saved['image_brief'], 'IMAGE_TASK_ONLY')
+        self.assertNotEqual(saved['image_reference_path'], saved['reference_path'])
+        args = self.app.image_ai.generate_image.call_args.args
+        self.assertIn('IMAGE_TASK_ONLY', args[4])
+        self.assertNotIn('TEXT_TASK_SECRET', args[4])
+        self.assertNotIn('GENERATED_TEXT_SECRET', args[4])
+        self.assertEqual(args[5], [{'role': 'reference', 'path': saved['image_reference_path']}])
+        self.assertEqual(self.store.revision(42, job['id'])['body'], 'GENERATED_TEXT_SECRET')
+        await self.click('Изменить текст')
+        await self.send('Сделай короче')
+        self.assertEqual(self.store.job(42)['image_brief'], 'IMAGE_TASK_ONLY')
 
     async def test_demo_sends_both_prompts_automatically_on_creation_revision_and_reopen(self):
         await self.setup_project()
@@ -398,7 +426,7 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(job['reference_path'])
         version = self.store.revision(42, job['id'])
         self.assertEqual(json.loads(version['prompt_materials']), [])
-        self.assertIn('Задание пользователя:\nКофе', version['image_prompt'])
+        self.assertNotIn('Кофе', version['image_prompt'])
 
     async def test_menu_add_select_compose_and_revise_without_commands(self):
         await self.send('/start')
