@@ -32,7 +32,8 @@ def response(body=None, status=200, data=PNG):
 class GenAPITests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
-        self.settings = Settings('', 1, 42, Path(self.tmp.name), demo=False, genapi_key='private-key')
+        self.settings = Settings('', 1, 42, Path(self.tmp.name), demo=False, genapi_key='private-key',
+                                 genapi_image_model='seedream-v5-lite')
         self.store = Store(self.settings.database)
         self.project = self.store.create_project(42, 'Персонаж')
         self.job, _ = self.store.create_job(42, 'История')
@@ -202,6 +203,49 @@ class GenAPITests(unittest.IsolatedAsyncioTestCase):
         self.session.get.return_value = response()
         await self.ai.generate_image(42, self.job, 1, 0, 'Сцена', [], 'square')
         self.assertNotIn('image_urls', self.session.request.call_args_list[0].kwargs['json'])
+
+    async def test_openai_low_native_parameters_for_all_formats_and_full_long_prompt(self):
+        self.ai.settings = replace(self.settings, genapi_image_model='gpt-image-2-5')
+        prompt = 'Исходное задание. Полная концепция. ' * 200
+        for slot, (format, size) in enumerate((('square', '1024x1024'), ('landscape', '1024x768'), ('portrait', '1024x1536'))):
+            self.session.request.side_effect = [response({'request_id': 950 + slot}),
+                response({'status': 'success', 'result': ['https://cdn.example/image.png']})]
+            self.session.get.return_value = response()
+            await self.ai.generate_image(42, self.job, 1, slot, prompt, [], format)
+            post = self.session.request.call_args_list[-2]
+            self.assertEqual(post.args, ('POST', 'https://api.gen-api.ru/api/v1/networks/gpt-image-2-5'))
+            self.assertEqual(post.kwargs['json'], {'prompt': prompt, 'num_images': 1,
+                'model': 'flare', 'quality': 'low', 'image_size': size, 'output_format': 'png', 'is_sync': False})
+            meta = json.loads(self.store.db.execute("SELECT request_meta FROM ai_requests WHERE kind='image' AND slot=?", (slot,)).fetchone()[0])
+            self.assertEqual((meta['variant'], meta['quality'], meta['image_size']), ('flare', 'low', size))
+        self.assertIsNone(self.store.db.execute("SELECT 1 FROM ai_requests WHERE kind<>'image'").fetchone())
+
+    async def test_openai_switch_reuses_pending_id_and_retries_only_explicitly_rejected_seedream(self):
+        self.ai.settings = replace(self.settings, genapi_image_model='gpt-image-2-5')
+        self.store.db.execute("INSERT INTO ai_requests(job_id,revision,kind,slot,model,status,request_id) VALUES (?,1,'image',0,'seedream-v5-lite','processing','960')", (self.job,))
+        self.session.request.side_effect = [response({'status': 'success', 'result': ['https://cdn.example/image.png']})]
+        self.session.get.return_value = response()
+        await self.ai.generate_image(42, self.job, 1, 0, 'Задание', [], 'square')
+        self.assertEqual(self.session.request.call_count, 1)
+        self.assertTrue(self.session.request.call_args.args[1].endswith('/request/get/960'))
+        self.store.db.execute("INSERT INTO ai_requests(job_id,revision,kind,slot,model,status) VALUES (?,1,'image',1,'seedream-v5-lite','rejected')", (self.job,))
+        self.session.request.side_effect = [response({'request_id': 961}),
+            response({'status': 'success', 'result': ['https://cdn.example/image.png']})]
+        await self.ai.generate_image(42, self.job, 1, 1, 'Задание', [], 'square')
+        self.assertTrue(self.session.request.call_args_list[-2].args[1].endswith('/networks/gpt-image-2-5'))
+        self.assertEqual(self.store.db.execute("SELECT model FROM ai_requests WHERE slot=1").fetchone()[0], 'gpt-image-2-5')
+
+    async def test_openai_never_uses_provider_default_quality_or_falls_back_on_error(self):
+        self.ai.settings = replace(self.settings, genapi_image_model='gpt-image-2-5', genapi_image_quality='auto')
+        with self.assertRaisesRegex(ProviderError, 'GENAPI_IMAGE_QUALITY'):
+            await self.ai.generate_image(42, self.job, 1, 0, 'Задание', [], 'square')
+        self.session.request.assert_not_called()
+        self.ai.settings = replace(self.ai.settings, genapi_image_quality='low')
+        self.session.request.side_effect = [response({'error': True, 'errors_validation': {'quality': ['Invalid quality.']}}, 422)]
+        with self.assertRaises(ProviderError):
+            await self.ai.generate_image(42, self.job, 1, 0, 'Задание', [], 'square')
+        self.assertEqual(self.session.request.call_count, 1)
+        self.assertEqual(self.session.request.call_args.kwargs['json']['quality'], 'low')
 
     async def test_long_prompt_is_sent_verbatim_directly_to_image_model_without_a_text_request(self):
         prompt = 'Задание: персонаж в кофейне. Концепция: ' + 'Важные детали концепции. ' * 600

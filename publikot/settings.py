@@ -28,7 +28,8 @@ class Settings:
     transport: str = 'vk'
     genapi_key: str = field(default='', repr=False)
     genapi_text_model: str = 'gpt-6-luna'
-    genapi_image_model: str = 'seedream-v5-lite'
+    genapi_image_model: str = 'gpt-image-2-5'
+    genapi_image_quality: str = 'low'
 
     @property
     def oauth_enabled(self):
@@ -88,4 +89,5 @@ class Settings:
                    os.getenv('YANDEX_API_KEY', ''), os.getenv('YANDEX_FOLDER_ID', ''),
                    os.getenv('TELEGRAM_VK_ACCESS_TOKEN' if transport == 'telegram' else 'VK_ACCESS_TOKEN', ''), client, secret, public, provider, int(port), transport,
                    os.getenv('GENAPI_API_KEY', '').strip(), os.getenv('GENAPI_TEXT_MODEL', 'gpt-6-luna'),
-                   os.getenv('GENAPI_IMAGE_MODEL', 'seedream-v5-lite'))
+                   os.getenv('GENAPI_IMAGE_MODEL', 'gpt-image-2-5'),
+                   os.getenv('GENAPI_IMAGE_QUALITY', 'low'))

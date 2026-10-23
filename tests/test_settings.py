@@ -22,6 +22,7 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(settings.group_id, 242305804)
         self.assertEqual(settings.database.name, 'publikot-vk.sqlite3')
         self.assertEqual(settings.owner_id, 42)
+        self.assertEqual((settings.genapi_image_model, settings.genapi_image_quality), ('gpt-image-2-5', 'low'))
 
     def test_telegram_identity_does_not_grant_vk_administration(self):
         with self.assertRaises(ConfigError):

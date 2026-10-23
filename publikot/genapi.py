@@ -17,6 +17,7 @@ BASE = 'https://api.gen-api.ru/api/v1'
 ROLES = {'style': 'Референс визуального стиля', 'character': 'Референс персонажей',
          'reference': 'Референс из задания'}
 FORMATS = {'square': (1024, 1024), 'landscape': (1536, 1024), 'portrait': (1024, 1536)}
+OPENAI_SIZES = {'square': '1024x1024', 'landscape': '1024x768', 'portrait': '1024x1536'}
 
 
 class GenAPIRejected(ProviderError):
@@ -34,7 +35,7 @@ def validation_details(body, *, payload=None, secret=''):
     errors = body.get('errors_validation', body.get('errors', {}))
     if not isinstance(errors, dict):
         return []
-    fields = r'(?:prompt|image_urls|width|height|num_images|max_images|translate_input|aspect_ratio|output_format|model|messages|max_tokens|reasoning_effort|is_sync|callback_url|system_prompt|seed|thinking_level|enable_safety_checker)'
+    fields = r'(?:prompt|image_urls|width|height|num_images|max_images|translate_input|aspect_ratio|output_format|model|quality|image_size|background|messages|max_tokens|reasoning_effort|is_sync|callback_url|system_prompt|seed|thinking_level|enable_safety_checker)'
     result = []
     for field, messages in list(errors.items())[:30]:
         if not isinstance(field, str) or not re.fullmatch(fields + r'(?:\.[0-9]{1,4})*(?:\.(?:content|type|text|role|image_url|url)(?:\.[0-9]{1,4})*)*', field):
@@ -83,6 +84,8 @@ def validation_details(body, *, payload=None, secret=''):
 def request_summary(model, payload):
     """Record what was actually submitted, without prompts, reference data or credentials."""
     result = {'model': model, 'fields': sorted(payload)}
+    if model == 'gpt-image-2-5':
+        result.update(variant=payload.get('model'), quality=payload.get('quality'), image_size=payload.get('image_size'))
     for key in ('width', 'height', 'num_images', 'max_images', 'max_tokens'):
         if type(payload.get(key)) is int:
             result[key] = payload[key]
@@ -203,12 +206,15 @@ class GenAPI:
             raise ProviderError('Добавьте GENAPI_API_KEY в .env.python на сервере и перезапустите бота.')
         if not re.fullmatch(r'[A-Za-z0-9_-]{1,100}', self.settings.genapi_text_model):
             raise ProviderError('Проверьте GENAPI_TEXT_MODEL.')
-        if self.settings.genapi_image_model not in ('seedream-v5-lite', 'nano-banana-lite'):
-            raise ProviderError('GENAPI_IMAGE_MODEL: seedream-v5-lite или nano-banana-lite.')
+        if self.settings.genapi_image_model not in ('gpt-image-2-5', 'seedream-v5-lite', 'nano-banana-lite'):
+            raise ProviderError('GENAPI_IMAGE_MODEL: gpt-image-2-5, seedream-v5-lite или nano-banana-lite.')
+        if (self.settings.genapi_image_model == 'gpt-image-2-5'
+                and self.settings.genapi_image_quality not in ('low', 'medium', 'high', 'xhigh', 'max')):
+            raise ProviderError('GENAPI_IMAGE_QUALITY: low, medium, high, xhigh или max. Запрос не отправлен.')
 
     async def request(self, session, method, path, payload=None):
         try:
-            upload = (method == 'POST' and path in ('/networks/seedream-v5-lite', '/networks/nano-banana-lite')
+            upload = (method == 'POST' and path in ('/networks/seedream-v5-lite', '/networks/nano-banana-lite', '/networks/gpt-image-2-5')
                       and payload and payload.get('image_urls'))
             body = {'data': image_form(payload)} if upload else {'json': payload}
             async with session.request(method, BASE + path, **body,
@@ -325,14 +331,19 @@ class GenAPI:
         if not isinstance(prompt, str) or not prompt.strip():
             raise ProviderError('GenAPI: пустой промпт изображения. Запрос не отправлен.')
         # Send the original task/concept directly, with no generated replacement or truncation.
-        payload = {'prompt': prompt, 'num_images': 1, 'translate_input': False}
+        payload = {'prompt': prompt, 'num_images': 1}
         if materials:
             payload['image_urls'] = [image_uri(m['path']) for m in materials]
-        if model == 'seedream-v5-lite':
+        if model == 'gpt-image-2-5':
+            # Native GenAPI schema: https://gen-api.ru/model/gpt-image-2-5/api
+            payload.update(model='flare', quality=self.settings.genapi_image_quality,
+                           image_size=OPENAI_SIZES[image_format], output_format='png')
+        elif model == 'seedream-v5-lite':
             width, height = FORMATS[image_format]
-            payload.update(width=width, height=height, max_images=1)
+            payload.update(width=width, height=height, max_images=1, translate_input=False)
         else:
-            payload.update(aspect_ratio={'square': '1:1', 'landscape': '3:2', 'portrait': '2:3'}[image_format], output_format='png')
+            payload.update(aspect_ratio={'square': '1:1', 'landscape': '3:2', 'portrait': '2:3'}[image_format],
+                           output_format='png', translate_input=False)
         result = await self.run(actor, job, revision, 'image', slot, model, payload)
         if len(result['result']) != 1 or not isinstance(result['result'][0], str):
             raise ProviderError('GenAPI вернул неожиданное количество изображений. Проверьте кабинет.')

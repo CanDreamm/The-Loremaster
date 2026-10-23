@@ -109,8 +109,12 @@ class GenAPIWholeStack(unittest.IsolatedAsyncioTestCase):
                                 self.assertIn('Расскажи, как открылась кофейня', data['prompt'])
                                 self.assertIn('Материал character', data['prompt'])
                                 self.assertEqual(len(data['image_urls']), 2 if 'Замечания' in data['prompt'] else 1)
-                                self.assertEqual((data['num_images'], data['max_images']), (1, 1))
-                                self.assertEqual((data['width'], data['height']), (1024, 1024))
+                                self.assertTrue(route.endswith('/gpt-image-2-5'))
+                                self.assertEqual(data['num_images'], 1)
+                                self.assertEqual((data['model'], data['quality'], data['image_size']), ('flare', 'low', '1024x1024'))
+                                self.assertNotIn('max_images', data)
+                                self.assertNotIn('width', data)
+                                self.assertNotIn('translate_input', data)
                                 for uri in data['image_urls']:
                                     self.assertEqual(base64.b64decode(uri.split(',', 1)[1]), PNG)
                                 tasks[ident] = [f'https://cdn.example/{ident}.png']
@@ -233,7 +237,7 @@ class GenAPIWholeStack(unittest.IsolatedAsyncioTestCase):
                         self.assertEqual(store.job(99)['status'], 'review')
                         await bot.generate_images(99, 99, job['id'], 1)
                         self.assertEqual(len(gen_payloads), 4)  # Article + three images, no article-based scene preparation.
-                        self.assertEqual(sum('/seedream-v5-lite' in route for route, _ in gen_payloads), 3)
+                        self.assertEqual(sum('/gpt-image-2-5' in route for route, _ in gen_payloads), 3)
                         job = store.job(99)
                         images = version_images(store.revision(99, job['id']))
                         self.assertEqual(len(images), 3)
@@ -244,7 +248,7 @@ class GenAPIWholeStack(unittest.IsolatedAsyncioTestCase):
                         self.assertEqual((new_images[0], new_images[2]), (images[0], images[2]))
                         self.assertNotEqual(new_images[1], images[1])
                         self.assertEqual(len(gen_payloads), 5)
-                        self.assertEqual(sum('/seedream-v5-lite' in route for route, _ in gen_payloads), 4)
+                        self.assertEqual(sum('/gpt-image-2-5' in route for route, _ in gen_payloads), 4)
                         job = store.job(99)
                         confirmation = {'action': 'publish', 'job': job['id'], 'revision': job['revision']}
                         await bot.action(99, 99, confirmation)
