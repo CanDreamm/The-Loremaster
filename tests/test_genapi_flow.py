@@ -264,7 +264,8 @@ class GenAPIWholeStack(unittest.IsolatedAsyncioTestCase):
                         self.assertEqual(uploaded, [PNG, PNG, PNG])
                         blocks = json.loads(published[1]['articleContent']['contentState'])['blocks']
                         self.assertEqual(sum(b['type'] == 'atomic:image' for b in blocks), 3)
-                        self.assertEqual(''.join(b['text'] for b in blocks if b['type'] == 'unstyled'), ARTICLE)
+                        self.assertEqual(published[1]['preview']['title'], 'Как кот открыл кофейню')
+                        self.assertEqual(''.join(b['text'] for b in blocks if b['type'] == 'unstyled'), ARTICLE.split('\n\n', 1)[1])
                         with self.assertRaises(Conflict):
                             await bot.action(99, 99, confirmation)
                         self.assertEqual(len(published), 2)

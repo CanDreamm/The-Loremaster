@@ -28,7 +28,7 @@ class TextVolumeTests(unittest.TestCase):
                                feedback='Увеличь до 2000 символов').text
         self.assertIn('Увеличь до 2000 символов', prompt)
         self.assertIn('Напиши 1500 символов', prompt)
-        self.assertTrue(prompt.endswith('Манеру речи, рассказчика и оформление бери из концепции проекта.'))
+        self.assertIn('Манеру речи, рассказчика и оформление бери из концепции проекта.', prompt)
         self.assertEqual(prompt.count('до 500 символов'), 1)  # Only the user's saved project rule.
         self.assertIn('Если в замечаниях объём не изменён', prompt)
 

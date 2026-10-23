@@ -21,7 +21,7 @@ class DzenDirectTests(unittest.IsolatedAsyncioTestCase):
             self.api.request = AsyncMock(side_effect=[{'publicationId': 'article123'}, {'id': 'image123'},
                 {}, {'data': {'publicUrl': 'https://dzen.ru/a/article123'}}])
             saved = []
-            result = await self.api.publish(self.target, 'Заголовок\nТекст <не HTML>', str(image), saved.append)
+            result = await self.api.publish(self.target, 'Заголовок\n\nТекст <не HTML>', str(image), saved.append, title='Заголовок')
             self.assertEqual(saved, ['article123'])
             self.assertEqual(result, ('article123', 'https://dzen.ru/a/article123'))
             calls = self.api.request.call_args_list
@@ -31,13 +31,14 @@ class DzenDirectTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(calls[-1].kwargs['final'])
             state = json.loads(payload['articleContent']['contentState'])
             self.assertEqual(state['blocks'][0]['type'], 'atomic:image')
-            self.assertEqual(state['blocks'][1]['text'], 'Заголовок\nТекст <не HTML>')
+            self.assertEqual(state['blocks'][1]['text'], 'Текст <не HTML>')
+            self.assertEqual(payload['preview']['title'], 'Заголовок')
             self.assertEqual(payload['preview']['image']['id'], 'image123')
 
     async def test_no_public_link_is_unknown_not_published(self):
         self.api.request = AsyncMock(side_effect=[{'id': 'article123'}, {}, {'ok': True}])
         with self.assertRaises(AmbiguousPublish):
-            await self.api.publish(self.target, 'Текст', None, lambda _: None)
+            await self.api.publish(self.target, 'Заголовок\n\nТекст', None, lambda _: None, title='Заголовок')
         self.assertEqual(self.api.request.await_count, 3)
 
     async def test_failed_image_stops_before_publish(self):
@@ -46,13 +47,22 @@ class DzenDirectTests(unittest.IsolatedAsyncioTestCase):
             image.write_bytes(b'photo')
             self.api.request = AsyncMock(side_effect=[{'id': 'article123'}, {'error': 'upload'}])
             with self.assertRaises(ProviderError):
-                await self.api.publish(self.target, 'Текст', str(image), lambda _: None)
+                await self.api.publish(self.target, 'Заголовок\n\nТекст', str(image), lambda _: None, title='Заголовок')
             self.assertEqual(self.api.request.await_count, 2)
 
     async def test_wrong_channel_cannot_use_another_session(self):
         self.api.request = AsyncMock()
         with self.assertRaises(ProviderError):
-            await self.api.publish({'remote_account': 'otherpublisher'}, 'Текст', None, lambda _: None)
+            await self.api.publish({'remote_account': 'otherpublisher'}, 'Заголовок\n\nТекст', None, lambda _: None, title='Заголовок')
+        self.api.request.assert_not_awaited()
+
+    async def test_missing_or_mismatched_title_stops_before_creating_a_draft(self):
+        self.api.request = AsyncMock()
+        for body, title in [('Просто начало статьи', ''),
+                            ('Начало статьи\n\nПродолжение', ''),
+                            ('Один заголовок\n\nТекст', 'Другой заголовок')]:
+            with self.subTest(body=body), self.assertRaises(ProviderError):
+                await self.api.publish(self.target, body, None, lambda _: None, title=title)
         self.api.request.assert_not_awaited()
 
     def test_auth_header_injection_and_editor_links_are_rejected(self):

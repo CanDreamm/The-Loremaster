@@ -333,12 +333,15 @@ class ProjectsAndPlatformsTests(unittest.IsolatedAsyncioTestCase):
         class Direct:
             def __init__(self, session_auth, session):
                 self.auth = session_auth
-            async def publish(self, target, body, image, remember):
+            async def publish(self, target, body, image, remember, *, title=''):
+                assert title == 'Заголовок Дзена'
                 calls.append(self.auth)
                 remember('article123')
                 return 'article123', 'https://dzen.ru/a/article123'
         self.platforms.dzen_factory = Direct
         ident = self.draft()
+        self.store.db.execute('UPDATE versions SET body=?,title=? WHERE job_id=?',
+                              ('Заголовок Дзена\n\nТекст статьи', 'Заголовок Дзена', ident))
         await self.platforms.publish(99, ident, 1)
         self.assertEqual(self.store.job(42, ident)['status'], 'published')
         self.assertEqual(calls, [auth])

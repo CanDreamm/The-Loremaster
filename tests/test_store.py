@@ -43,6 +43,20 @@ class StoreTests(unittest.TestCase):
         with self.assertRaises(Conflict):
             self.store.save_version(42, job, 1, 'Completed text', False)
 
+    def test_explicit_title_survives_image_changes_text_restore_and_restart(self):
+        job, _ = self.store.create_job(42, 'Task')
+        self.store.save_version(42, job, 1, 'Отдельный заголовок\n\nОсновной текст', False)
+        self.assertEqual(self.store.revision(42, job)['title'], 'Отдельный заголовок')
+        self.store.replace_images(42, job, 1, ['/photo.png'])
+        self.assertEqual(self.store.revision(42, job)['title'], 'Отдельный заголовок')
+        self.store.revise(42)
+        self.store.finish(42, job, 'failed')
+        self.store.restore_text_draft(42, job, 3)
+        self.assertEqual(self.store.revision(42, job)['title'], 'Отдельный заголовок')
+        self.store.db.close()
+        self.store = Store(self.path)
+        self.assertEqual(self.store.revision(42, job)['title'], 'Отдельный заголовок')
+
     def test_second_store_cannot_interrupt_generation_or_publication(self):
         from publikot.settings import ConfigError
         job, _ = self.store.create_job(42, 'Live generation')

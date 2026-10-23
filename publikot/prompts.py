@@ -2,6 +2,8 @@
 from dataclasses import dataclass
 import re
 
+from .publication_text import TITLE_POLICY
+
 
 LEGACY_TEXT_TEMPLATE = """Создай публикацию на основе моего сообщения и приложенных материалов.
 
@@ -99,7 +101,7 @@ def build_prompts(project, brief, materials=(), reference_path=None, previous=''
         context, material_context, 'Задание пользователя:\n' + brief,
         'Предыдущий текст:\n' + previous if previous else '',
         'Исправления текста:\n' + feedback if feedback else '',
-        text_volume_policy(project, brief, feedback),
+        text_volume_policy(project, brief, feedback), TITLE_POLICY,
     )))
     # body is accepted for compatibility; generated publication text is never an image input.
     image = build_image_prompt(project, image_brief, materials)

@@ -4,6 +4,8 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from .database_lock import ExclusiveConnection
+from .publication_text import split_publication
+from .providers import ProviderError
 from .prompts import TEXT_TEMPLATE, IMAGE_TEMPLATE, LEGACY_TEXT_TEMPLATE, LEGACY_IMAGE_TEMPLATE
 
 
@@ -110,6 +112,8 @@ class Store(PlatformStore):
         if 'image_path' not in version_columns:
             self.db.execute('ALTER TABLE versions ADD COLUMN image_path TEXT')
             self.db.execute('UPDATE versions SET image_path=(SELECT image_path FROM jobs WHERE jobs.id=versions.job_id)')
+        if 'title' not in version_columns:
+            self.db.execute("ALTER TABLE versions ADD COLUMN title TEXT NOT NULL DEFAULT ''")
         for field in ('text_prompt', 'image_prompt', 'prompt_materials'):
             if field not in version_columns:
                 self.db.execute(f"ALTER TABLE versions ADD COLUMN {field} TEXT NOT NULL DEFAULT ''")
@@ -464,8 +468,15 @@ class Store(PlatformStore):
                 raise Conflict(f"Задание уже изменилось: ожидалась версия {revision}, "
                                f"текущая версия {job['revision']}, состояние {job['status']}.")
             self.db.execute('INSERT INTO versions(job_id,revision,body,is_demo,image_path) VALUES (?,?,?,?,?)', (ident, revision, body, int(demo), job['image_path']))
-            self.db.execute('UPDATE versions SET image_paths=? WHERE job_id=? AND revision=?',
-                            (job['image_paths'], ident, revision))
+            format_request = self.db.execute("SELECT request_meta FROM ai_requests WHERE job_id=? AND revision=? "
+                "AND kind='text' AND slot=0", (ident, revision)).fetchone()
+            declared_title = not format_request or json.loads(format_request['request_meta'] or '{}').get('publication_title_required')
+            try:
+                title, _ = split_publication(body) if declared_title else ('', '')
+            except ProviderError:
+                title = ''
+            self.db.execute('UPDATE versions SET title=?,image_paths=? WHERE job_id=? AND revision=?',
+                            (title, job['image_paths'], ident, revision))
             if prompts is not None:
                 self.db.execute('UPDATE versions SET text_prompt=?,image_prompt=?,prompt_materials=? WHERE job_id=? AND revision=?',
                     (prompts.text, prompts.image, json.dumps(prompts.materials, ensure_ascii=False), ident, revision))
@@ -496,7 +507,7 @@ class Store(PlatformStore):
                                   'ORDER BY revision DESC LIMIT 1', (ident, revision)).fetchone()
             if old is None:
                 raise Conflict('Предыдущего текста нет.')
-            fields = ('body', 'is_demo', 'image_path', 'text_prompt', 'image_prompt', 'prompt_materials', 'image_paths')
+            fields = ('title', 'body', 'is_demo', 'image_path', 'text_prompt', 'image_prompt', 'prompt_materials', 'image_paths')
             self.db.execute('INSERT INTO versions(job_id,revision,' + ','.join(fields) + ') VALUES (?,?,'
                             + ','.join('?' for _ in fields) + ')',
                             (ident, revision + 1, *(old[f] for f in fields)))
@@ -539,8 +550,8 @@ class Store(PlatformStore):
             old = self.revision(actor, ident)
             next_revision = revision + 1
             self.db.execute('INSERT INTO versions(job_id,revision,body,is_demo,image_path) VALUES (?,?,?,?,?)', (ident, next_revision, old['body'], old['is_demo'], path))
-            self.db.execute('UPDATE versions SET text_prompt=?,image_prompt=?,prompt_materials=? WHERE job_id=? AND revision=?',
-                (old['text_prompt'], old['image_prompt'] if image_prompt is None else image_prompt, old['prompt_materials'], ident, next_revision))
+            self.db.execute('UPDATE versions SET title=?,text_prompt=?,image_prompt=?,prompt_materials=? WHERE job_id=? AND revision=?',
+                (old['title'], old['text_prompt'], old['image_prompt'] if image_prompt is None else image_prompt, old['prompt_materials'], ident, next_revision))
             self.db.execute('UPDATE jobs SET revision=?,image_path=? WHERE id=?', (next_revision, path, ident))
             self.db.execute('UPDATE jobs SET image_paths=? WHERE id=?', (json.dumps(images), ident))
             self.db.execute('UPDATE versions SET image_paths=? WHERE job_id=? AND revision=?',
@@ -621,7 +632,7 @@ class Store(PlatformStore):
                       'publish_mode', 'browser_target', 'destinations', 'image_paths', 'generation_context', 'image_brief', 'image_reference_path', 'image_tasks')
             self.db.execute('INSERT INTO jobs(id,owner,status,' + ','.join(fields) + ') VALUES (?, ?, \'review\','
                             + ','.join('?' for _ in fields) + ')', (new, actor, *(job[f] for f in fields)))
-            fields = ('body', 'is_demo', 'image_path', 'text_prompt', 'image_prompt', 'prompt_materials', 'image_paths')
+            fields = ('title', 'body', 'is_demo', 'image_path', 'text_prompt', 'image_prompt', 'prompt_materials', 'image_paths')
             self.db.execute('INSERT INTO versions(job_id,revision,' + ','.join(fields) + ') VALUES (?,1,'
                             + ','.join('?' for _ in fields) + ')', (new, *(old[f] for f in fields)))
             self.db.execute('UPDATE jobs SET restored_job_id=? WHERE id=?', (new, ident))

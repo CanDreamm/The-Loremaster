@@ -87,7 +87,7 @@ class VkPhotoWorkflow(unittest.IsolatedAsyncioTestCase):
                     return web.json_response({'request_id': len(payloads)})
                 if request.path.startswith('/gen/request/get/'):
                     ident = int(request.path.rsplit('/', 1)[-1])
-                    result = ['Готовая история от лица персонажа'] if ident == 1 else [f'https://cdn.example/{ident}.png']
+                    result = ['История персонажа\n\nГотовая история от лица персонажа'] if ident == 1 else [f'https://cdn.example/{ident}.png']
                     return web.json_response({'status': 'success', 'result': result})
                 self.fail(request.path)
 
@@ -144,7 +144,7 @@ class VkPhotoWorkflow(unittest.IsolatedAsyncioTestCase):
                         store.configure(42, 'image_count', 3)
                         await send('/post Расскажи историю с этим предметом', photo=True)
                         job = store.job(42)
-                        self.assertEqual(store.revision(42, job['id'])['body'], 'Готовая история от лица персонажа')
+                        self.assertEqual(store.revision(42, job['id'])['body'], 'История персонажа\n\nГотовая история от лица персонажа')
                         await bot.handle({'group_id': 123, 'type': 'message_event', 'object': {
                             'user_id': 42, 'peer_id': 42, 'event_id': 'images-callback',
                             'payload': {'action': 'generateimages', 'job': job['id'], 'revision': 1}}})

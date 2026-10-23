@@ -4,6 +4,7 @@ import re
 
 import aiohttp
 
+from .publication_text import split_publication
 from .dzen_api import DzenAPI, validate_auth
 from .oauth import Vault
 from .postmypost import Postmypost, RequestBudget
@@ -81,6 +82,7 @@ class Platforms:
                     await self.pmp(target['credential_owner'], session, secret).check_account(target)
                 else:
                     validate_auth(json.loads(secret))
+                    split_publication(s.revision(actor, ident)['body'], s.revision(actor, ident)['title'])
             # The claim transaction compares the full destination/token snapshot again.
             job, version = s.claim(actor, ident, revision)
             for target in targets:
@@ -99,7 +101,8 @@ class Platforms:
                     else:
                         client = self.dzen_factory(json.loads(secret), session)
                         remote, url = await client.publish(target, version['body'], publication_images(version),
-                            lambda draft: s.delivery_update(actor, ident, dest, 'sending', remote_id=draft))
+                            lambda draft: s.delivery_update(actor, ident, dest, 'sending', remote_id=draft),
+                            title=version['title'])
                         s.delivery_update(actor, ident, dest, 'published', remote_id=remote, url=url)
                 except AmbiguousPublish as error:
                     s.delivery_update(actor, ident, dest, 'unknown', error=str(error))

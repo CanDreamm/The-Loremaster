@@ -34,7 +34,7 @@ class BrowserFlowTests(unittest.IsolatedAsyncioTestCase):
         target = 'https://dzen.ru/profile/editor/id/channel' if platform == 'dzen' else 'https://vk.ru/club456'
         self.store.browser_destination(42, platform, target)
         ident, _ = self.store.create_job(42, 'Задание')
-        self.store.save_version(42, ident, 1, 'Заголовок\nТекст', demo)
+        self.store.save_version(42, ident, 1, 'Заголовок\n\nТекст', demo)
         return ident
 
     async def publish(self, ident, revision=1):
@@ -144,7 +144,7 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
             modules = {'playwright': types.ModuleType('playwright'), 'playwright.async_api': module}
             with patch.dict('sys.modules', modules):
                 with patch.object(publisher, '_result', AsyncMock(return_value='https://dzen.ru/a/post')):
-                    result = await publisher.publish(page.url, 'Заголовок\nСодержимое', str(photo), 1)
+                    result = await publisher.publish(page.url, 'Заголовок\n\nСодержимое', str(photo), 1)
                 self.assertEqual(result, 'https://dzen.ru/a/post')
                 locator(publisher.selectors['title']).fill.assert_awaited_with('Заголовок')
                 locator(publisher.selectors['body']).fill.assert_awaited_with('Содержимое')
@@ -152,10 +152,10 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
                 locator(publisher.selectors['publish']).click.assert_awaited_once()
                 locator(publisher.selectors['publish']).click.side_effect = TimeoutError()
                 with self.assertRaises(AmbiguousPublish):
-                    await publisher.publish(page.url, 'Текст', None, 2)
+                    await publisher.publish(page.url, 'Заголовок\n\nТекст', None, 2)
                 locator(publisher.selectors['open']).click.side_effect = TimeoutError()
                 with self.assertRaises(ProviderError) as error:
-                    await publisher.publish(page.url, 'Текст', None, 3)
+                    await publisher.publish(page.url, 'Заголовок\n\nТекст', None, 3)
                 self.assertNotIsInstance(error.exception, AmbiguousPublish)
 
     async def test_no_success_for_old_post_or_channel_link(self):

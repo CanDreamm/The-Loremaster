@@ -414,6 +414,16 @@ class GenAPITests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.store.job(42, self.job)['status'], 'review')
         self.assertEqual(self.store.revision(42, self.job)['body'], 'Согласованный текст')
 
+    async def test_titleless_generated_response_is_not_silently_published_or_retried(self):
+        from publikot.prompts import build_prompts
+        prompt = build_prompts(dict(self.store.require(42, self.project)), 'Публикация').text
+        self.session.request.side_effect = [response({'request_id': 1300}),
+            response({'status': 'success', 'result': ['Текст без отдельного заголовка']})]
+        for _ in range(2):
+            with self.assertRaisesRegex(ProviderError, 'отдельного заголовка'):
+                await self.ai.generate('', 'Публикация', prompt=prompt, request_key=(42, self.job, 1))
+        self.assertEqual(sum(c.args[0] == 'POST' for c in self.session.request.call_args_list), 1)
+
     async def test_resume_without_known_request_id_never_posts(self):
         self.store.db.execute("UPDATE jobs SET status='failed',generation_context=? WHERE id=?",
                               (json.dumps({'project': dict(self.store.require(42, self.project))}), self.job))
@@ -437,16 +447,16 @@ class GenAPITests(unittest.IsolatedAsyncioTestCase):
             return body
         self.ai.generate = interrupted
         self.session.request.side_effect = [response({'request_id': 1201}),
-            response({'status': 'success', 'result': ['Recovered publication']})]
+            response({'status': 'success', 'result': ['Заголовок\n\nRecovered publication']})]
         await bot.generate(42, 42, '/post', 'Приветственная публикация', {})
         ident = self.store.job(42)['id']
         self.assertEqual(self.store.job(42)['status'], 'review')
-        self.assertEqual(self.store.revision(42, ident)['body'], 'Recovered publication')
+        self.assertEqual(self.store.revision(42, ident)['body'], 'Заголовок\n\nRecovered publication')
         self.session.request.side_effect = [response({'request_id': 1202}),
-            response({'status': 'success', 'result': ['Recovered revision']})]
+            response({'status': 'success', 'result': ['Заголовок\n\nRecovered revision']})]
         await bot.generate(42, 42, '/revise', 'Более развернуто', {})
         self.assertEqual(self.store.job(42)['status'], 'review')
-        self.assertEqual(self.store.revision(42, ident)['body'], 'Recovered revision')
+        self.assertEqual(self.store.revision(42, ident)['body'], 'Заголовок\n\nRecovered revision')
         self.assertEqual(sum(c.args[0] == 'POST' for c in self.session.request.call_args_list), 2)
 
     async def test_failed_revision_resumes_saved_request_without_losing_previous_text(self):
@@ -462,9 +472,9 @@ class GenAPITests(unittest.IsolatedAsyncioTestCase):
         await bot.menu(42, 42, {'screen': 'job', 'project': self.project, 'job': self.job})
         self.assertIn('1104', client.send.call_args.args[1])
         self.assertIn('Проверить результат ИИ', str(client.send.call_args.kwargs['keyboard']))
-        self.session.request.side_effect = [response({'status': 'success', 'result': ['Revised text']})]
+        self.session.request.side_effect = [response({'status': 'success', 'result': ['Заголовок\n\nRevised text']})]
         await bot.generate(42, 42, '/resume', '', {})
-        self.assertEqual(self.store.revision(42, self.job)['body'], 'Revised text')
+        self.assertEqual(self.store.revision(42, self.job)['body'], 'Заголовок\n\nRevised text')
         self.assertEqual(self.store.job(42)['generation_error'], '')
         self.assertEqual(sum(c.args[0] == 'POST' for c in self.session.request.call_args_list), 1)
 
@@ -481,7 +491,7 @@ class GenAPITests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.store.job(42)['status'], 'failed')
         self.store.configure(42, 'concept', 'Другой характер')
         self.store.configure(42, 'image_count', 3)
-        self.session.request.side_effect = [response({'status': 'success', 'result': ['Готовая история']})]
+        self.session.request.side_effect = [response({'status': 'success', 'result': ['Заголовок\n\nГотовая история']})]
         await bot.generate(42, 42, '/resume', '', {})
         version = self.store.revision(42, ident)
         self.assertEqual(self.store.job(42)['status'], 'review')

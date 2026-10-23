@@ -12,6 +12,7 @@ import aiohttp
 from .http_media import PublicResolver
 
 from .providers import ProviderError
+from .publication_text import TITLE_POLICY, split_publication
 
 BASE = 'https://api.gen-api.ru/api/v1'
 ROLES = {'style': 'Референс визуального стиля', 'character': 'Референс персонажей',
@@ -97,6 +98,7 @@ def request_summary(model, payload):
     messages = payload.get('messages')
     if isinstance(messages, list) and messages and isinstance(messages[0], dict) and isinstance(messages[0].get('content'), str):
         result['system_prompt_chars'] = len(messages[0]['content'])
+        result['publication_title_required'] = TITLE_POLICY in messages[0]['content']
     if isinstance(payload.get('image_urls'), list):
         result['reference_count'] = len(payload['image_urls'])
         result['reference_chars'] = [len(value) for value in payload['image_urls'] if isinstance(value, str)]
@@ -324,6 +326,10 @@ class GenAPI:
         if len(body) > 30000:
             raise ProviderError(f'GenAPI: получено {len(body)} символов при лимите 30000. '
                                 'Сократите заданный объём публикации.')
+        request = self.store.db.execute("SELECT request_meta FROM ai_requests WHERE job_id=? AND revision=? "
+            "AND kind='text' AND slot=0", (request_key[1], request_key[2])).fetchone()
+        if request and json.loads(request['request_meta'] or '{}').get('publication_title_required'):
+            split_publication(body)
         return body
 
     async def generate_image(self, actor, job, revision, slot, prompt, materials, image_format):

@@ -8,6 +8,7 @@ from pathlib import Path
 from urllib.parse import urljoin, urlsplit
 
 from .providers import AmbiguousPublish, ProviderError
+from .publication_text import split_publication
 
 
 def validate_target(platform, target):
@@ -89,6 +90,8 @@ class BrowserPublisher:
         self.check_ready()
         if not body.strip():
             raise ProviderError('Пустой текст нельзя публиковать.')
+        if self.platform == 'dzen':
+            title, content = split_publication(body)
         from .media import paths
         images = paths(image_path)
         if any(not Path(path).is_file() for path in images):
@@ -114,11 +117,8 @@ class BrowserPublisher:
                         await page.locator(self.selectors['open']).click()
                         if self.platform == 'dzen':
                             await page.locator(self.selectors['article']).click()
-                            # The first nonempty line becomes the article title.
-                            title, _, content = body.strip().partition('\n')
-                            await page.locator(self.selectors['title']).fill(title[:140])
-                            await page.locator(self.selectors['body']).fill(
-                                body.strip() if len(title) > 140 else content.strip() or body.strip())
+                            await page.locator(self.selectors['title']).fill(title)
+                            await page.locator(self.selectors['body']).fill(content)
                         else:
                             await page.locator(self.selectors['body']).fill(body)
                         if images:

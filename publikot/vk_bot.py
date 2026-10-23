@@ -6,6 +6,7 @@ from .providers import AmbiguousPublish, ProviderError, VkPublisher, YandexText
 from .store import Conflict
 from .menus import BotMenus, button as menu_button, keyboard, back
 from .prompts import build_prompts, build_image_prompt
+from .publication_text import split_publication
 from .browser_publish import BrowserPublisher, profile_path
 from .platforms import Platforms
 from .genapi import GenAPI
@@ -586,6 +587,9 @@ class VkBot(BotMenus):
             if not token:
                 raise Conflict('Нет действующего ключа публикации. Выполните /connect или настройте /browser vk ССЫЛКА.')
             publisher = self.publisher_factory(token)
+        if job['publish_mode'] == 'dzen_browser':
+            approved = s.revision(actor, ident)
+            split_publication(approved['body'], approved['title'])
         job, version = s.claim(actor, ident, revision)
         try:
             publish_id = f'telegram-{ident}' if self.settings.transport == 'telegram' and not browser else ident

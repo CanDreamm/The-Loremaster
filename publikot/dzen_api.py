@@ -9,6 +9,7 @@ from urllib.parse import urlsplit
 import aiohttp
 
 from .providers import AmbiguousPublish, ProviderError
+from .publication_text import split_publication
 
 BASE = 'https://dzen.ru/editor-api/v2/'
 
@@ -91,17 +92,18 @@ class DzenAPI:
                 raise AmbiguousPublish('Дзен: результат публикации неизвестен. Автоматического повтора не будет.') from None
             raise ProviderError('Дзен: не удалось подготовить статью. Проверьте сеанс или изменения editor API.') from None
 
-    async def publish(self, target, body, image_path, remember_draft):
+    async def publish(self, target, body, image_path, remember_draft, *, title=''):
         if target['remote_account'] != self.publisher:
             raise ProviderError('Сеанс Дзена принадлежит другому каналу.')
         if not body.strip():
             raise ProviderError('Нельзя отправить пустую статью.')
+        title, content = split_publication(body, title)
         from .media import paths
         images = paths(image_path)
         if any(not Path(path).is_file() for path in images):
             raise ProviderError('Фотография не найдена; статья не отправлена.')
         created = await self.request('add-publication', json={
-            'title': '', 'publisherId': self.publisher, 'publicationType': 'article'})
+            'title': title, 'publisherId': self.publisher, 'publicationType': 'article'})
         nested = created.get('data') if isinstance(created.get('data'), dict) else {}
         ident = created.get('publicationId') or created.get('id') or nested.get('id')
         if not isinstance(ident, str) or not re.fullmatch(r'[A-Za-z0-9_-]{8,100}', ident):
@@ -119,13 +121,12 @@ class DzenAPI:
             if not isinstance(image_id, str) or not image_id:
                 raise ProviderError('Дзен не подтвердил загрузку фото; статья не отправлена.')
             image_ids.append(image_id)
-        title = body.strip().split('\n')[0][:140]
         blocks = []
         for image_id in image_ids:
             blocks.append({'key': uuid.uuid4().hex[:5], 'text': '', 'type': 'atomic:image',
                            'depth': 0, 'inlineStyleRanges': [], 'entityRanges': [], 'data': {'image': {'id': image_id}}})
-        # Keep all approved text; never interpret it as HTML or silently omit a long title.
-        blocks.append({'key': uuid.uuid4().hex[:5], 'text': body, 'type': 'unstyled',
+        # The explicit headline belongs only in preview.title; keep the article body separate.
+        blocks.append({'key': uuid.uuid4().hex[:5], 'text': content, 'type': 'unstyled',
                        'depth': 0, 'inlineStyleRanges': [], 'entityRanges': [], 'data': {}})
         preview = {'title': title, 'snippet': '', 'galleryPreviewImages': []}
         if image_ids:
