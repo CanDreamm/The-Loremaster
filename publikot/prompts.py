@@ -1,5 +1,6 @@
 """Build separate text and image instructions, keeping image inputs by role."""
 from dataclasses import dataclass
+import re
 
 
 TEXT_TEMPLATE = """Создай публикацию на основе моего сообщения и приложенных материалов.
@@ -32,6 +33,27 @@ class PublicationPrompts:
     materials: list[dict]
 
 
+def text_volume_policy(project, brief, feedback):
+    # Do not add a competing numeric default when length/long form is requested.
+    sources = (feedback, brief, project.get('text_prompt', ''), project.get('text_template', ''),
+               project.get('concept', ''), project.get('tone', ''))
+    explicit = any(re.search(
+        r'\d[\d\s.,\-–—]*(?:(?:тыс(?:яч[аиу]?)?\.?|[кk])\s*)?'
+        r'(?:символ|знак|слов|абзац|предложени|строк)|стать[яюи]|разв[её]рнут|подробн|объ[её]м|длиннее',
+        value, re.I) for value in sources)
+    return (
+        'Приоритет требований к тексту: последние замечания пользователя, затем текущее задание, '
+        'затем правила и шаблон проекта. Указанный в задании объём относится к готовой публикации. '
+        'Если в замечаниях объём не изменён, сохрани объём из исходного задания. '
+        'Не подменяй запрошенный объём более коротким анонсом или резюме. '
+        'Число символов считай вместе с пробелами, если пользователь не указал иначе. '
+        'Если указано конкретное число символов, стремись к этому объёму; '
+        'ограничение сверху применяй только при словах «до», «не более» или аналогичных. '
+        'Перед ответом проверь соответствие запрошенному объёму. '
+        + ('' if explicit else 'Если объём нигде не задан, напиши короткий пост до 500 символов. ')
+        + 'Манеру речи и рассказчика бери из настроек проекта.')
+
+
 def build_prompts(project, brief, materials=(), reference_path=None, previous='', feedback='', body=''):
     context = '\n\n'.join(f'{label}:\n{project[key]}' for key, label in (
         ('concept', 'Концепция проекта'), ('tone', 'Тон общения'),
@@ -54,11 +76,10 @@ def build_prompts(project, brief, materials=(), reference_path=None, previous=''
     material_context = '\n\n'.join(descriptions)
     text = '\n\n'.join(filter(None, (
         project['text_template'],
-        'Если объём и формат не заданы в правилах проекта или задании, напиши короткий пост до 500 символов. '
-        'Для статьи соблюдай запрошенные структуру и объём. Манеру речи и рассказчика бери из настроек проекта.',
         context, material_context, 'Задание пользователя:\n' + brief,
         'Предыдущий текст:\n' + previous if previous else '',
         'Исправления текста:\n' + feedback if feedback else '',
+        text_volume_policy(project, brief, feedback),
     )))
     image = '\n\n'.join(filter(None, (
         project['image_template'], context,

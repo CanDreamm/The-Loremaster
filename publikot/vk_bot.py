@@ -205,6 +205,7 @@ class VkBot(BotMenus):
         context = json.loads(job['generation_context'] or '{}')
         desired = context.get('project', {}).get('image_count', 0)
         label += f'Изображений: {len(version_images(version))}' + (f' из {desired}' if desired else '') + '.\n'
+        label += f"Объём текста: {len(version['body'])} символов с пробелами.\n"
         await self.client.send(peer, label)
         for path in version_images(version):
             await self.client.send_photo(peer, path)
