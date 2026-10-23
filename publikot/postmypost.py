@@ -4,7 +4,7 @@ import mimetypes
 import re
 import time
 from collections import defaultdict, deque
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import aiohttp
@@ -182,7 +182,7 @@ class Postmypost:
         files = [await self.upload(target['remote_project'], path) for path in images]
         return await self.request('POST', '/publications', json={
             'project_id': int(target['remote_project']), 'account_ids': [int(target['remote_account'])],
-            'post_at': datetime.now(timezone.utc).isoformat(), 'publication_status': 5,
+            'post_at': (datetime.now(timezone.utc) + timedelta(minutes=2)).isoformat(), 'publication_status': 5,
             'details': [{'account_id': int(target['remote_account']), 'publication_type': 1,
                          'content': body, 'file_ids': files}]})
 
