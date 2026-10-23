@@ -19,6 +19,70 @@ ROLES = {'style': 'Референс визуального стиля', 'charact
 FORMATS = {'square': (1024, 1024), 'landscape': (1536, 1024), 'portrait': (1024, 1536)}
 
 
+class GenAPIRejected(ProviderError):
+    """An explicit validation rejection, distinct from an unknown submission outcome."""
+
+
+def validation_details(body):
+    """Extract field names and known validation rules, never echoed input or raw errors.
+
+    Native GenAPI documents errors_validation (not just errors) for HTTP 422:
+    https://gen-api.ru/docs/v1/generations/ai-request
+    """
+    if not isinstance(body, dict):
+        return []
+    errors = body.get('errors_validation', body.get('errors', {}))
+    if not isinstance(errors, dict):
+        return []
+    fields = r'(?:prompt|image_urls|width|height|num_images|max_images|translate_input|aspect_ratio|output_format|model|messages|max_tokens|reasoning_effort|is_sync|callback_url|system_prompt|seed|thinking_level|enable_safety_checker)'
+    result = []
+    for field, messages in list(errors.items())[:30]:
+        if not isinstance(field, str) or not re.fullmatch(fields + r'(?:\.[0-9]{1,4})*(?:\.(?:content|type|text|role|image_url|url)(?:\.[0-9]{1,4})*)*', field):
+            continue
+        messages = [messages] if isinstance(messages, str) else messages
+        rules = []
+        for message in messages if isinstance(messages, list) else []:
+            if not isinstance(message, str):
+                continue
+            message = message.lower()
+            for pattern, label in (
+                (r'(?:at least|greater than or equal to|не менее|минимум)\s+([0-9]{1,8})(?![0-9])', 'минимум'),
+                (r'(?:at most|not (?:be )?greater than|less than or equal to|не более|максимум)\s+([0-9]{1,8})(?![0-9])', 'максимум'),
+            ):
+                match = re.search(pattern, message)
+                if match:
+                    rules.append(label + ' ' + match[1])
+            for pattern, label in ((r'\brequired\b|обязател', 'обязательное поле'),
+                (r'\binteger\b|целым числом', 'нужно целое число'),
+                (r'\bboolean\b|логическ', 'нужно true/false'),
+                (r'\barray\b|массив', 'нужен массив'),
+                (r'\b(?:valid|invalid) url\b|корректн\S* (?:ссылк|url)', 'проверьте формат URL'),
+                (r'\bbase64\b', 'проверьте Base64'),
+                (r'\b(?:selected|enum|one of)\b|недопустим', 'недопустимое значение'),
+                (r'\b(?:file type|image type|mimes|mime type)\b|тип файла', 'проверьте тип файла')):
+                if re.search(pattern, message):
+                    rules.append(label)
+        result.append(field + (': ' + ', '.join(dict.fromkeys(rules)) if rules else ': отклонено'))
+    return result[:10]
+
+
+def request_summary(model, payload):
+    """Record what was actually submitted, without prompts, reference data or credentials."""
+    result = {'model': model, 'fields': sorted(payload)}
+    for key in ('width', 'height', 'num_images', 'max_images', 'max_tokens'):
+        if type(payload.get(key)) is int:
+            result[key] = payload[key]
+    for key in ('translate_input', 'is_sync'):
+        if type(payload.get(key)) is bool:
+            result[key] = payload[key]
+    if isinstance(payload.get('prompt'), str):
+        result['prompt_chars'] = len(payload['prompt'])
+    if isinstance(payload.get('image_urls'), list):
+        result['reference_count'] = len(payload['image_urls'])
+        result['reference_chars'] = [len(value) for value in payload['image_urls'] if isinstance(value, str)]
+    return result
+
+
 def extract_text(value):
     """Read final assistant output only; never stringify payloads or echo input/reasoning."""
     if isinstance(value, str):
@@ -105,6 +169,22 @@ class GenAPI:
                     headers={'Authorization': 'Bearer ' + self.settings.genapi_key},
                     allow_redirects=False, timeout=aiohttp.ClientTimeout(total=90)) as response:
                 if not 200 <= response.status < 300:
+                    if response.status == 422:
+                        try:
+                            body = await response.json()
+                        except (aiohttp.ClientError, ValueError):
+                            body = None
+                        details = validation_details(body)
+                        model = path.removeprefix('/networks/') if path.startswith('/networks/') else ''
+                        model = model if re.fullmatch(r'[A-Za-z0-9_-]{1,100}', model) else ''
+                        message = 'GenAPI: HTTP 422' + (f' ({model})' if model else '') + '. '
+                        message += '; '.join(details) + '. ' if details else 'Сервис не указал распознанные поля ошибки. '
+                        # Only a documented validation rejection of POST is safe to resubmit.
+                        if (method == 'POST' and isinstance(body, dict)
+                                and isinstance(body.get('errors_validation'), dict)
+                                and not body.get('request_id')):
+                            raise GenAPIRejected(message + 'Запрос отклонён до генерации. После исправления повторите действие в задании.')
+                        raise ProviderError(message + 'Автоматического повтора нет.')
                     hint = {401: 'Недействительный ключ.', 402: 'Проверьте баланс.',
                             403: 'Проверьте доступ.', 422: 'Проверьте параметры модели.',
                             429: 'Превышен лимит запросов.'}.get(response.status, 'Сервис недоступен.')
@@ -129,17 +209,29 @@ class GenAPI:
             if kind != 'text' or text_result(cached):
                 return cached
             # Old versions discarded full_response. Recover it by GET of the SAME ID.
-        if row and not row['request_id']:
+        ready_to_submit = row and row['status'] in ('rejected', 'retry_authorized')
+        if row and not row['request_id'] and not ready_to_submit:
             raise ProviderError('GenAPI: ID предыдущего запроса не получен. Проверьте историю в кабинете. '
                                 'Повторная платная генерация автоматически не выполняется.')
         if row and row['status'] == 'error':
             raise ProviderError('GenAPI завершил этот запрос с ошибкой. Проверьте кабинет; создайте новое задание для новой попытки.')
         async with self.session_factory(trust_env=True) as session:
-            if not row:
+            if not row or ready_to_submit:
                 # Persist intent BEFORE the external write: crash/timeout cannot resubmit it.
-                self.store.db.execute('INSERT INTO ai_requests(job_id,revision,kind,slot,model,status) VALUES (?,?,?,?,?,?)',
-                                      (*key, model, 'submitting'))
-                result = await self.request(session, 'POST', '/networks/' + model, {**payload, 'is_sync': False})
+                outgoing = {**payload, 'is_sync': False}
+                metadata = json.dumps(request_summary(model, outgoing))
+                if ready_to_submit:
+                    self.store.db.execute("UPDATE ai_requests SET model=?,status='submitting',result='',request_meta=? WHERE job_id=? AND revision=? AND kind=? AND slot=?",
+                                          (model, metadata, *key))
+                else:
+                    self.store.db.execute('INSERT INTO ai_requests(job_id,revision,kind,slot,model,status,request_meta) VALUES (?,?,?,?,?,?,?)',
+                                          (*key, model, 'submitting', metadata))
+                try:
+                    result = await self.request(session, 'POST', '/networks/' + model, outgoing)
+                except GenAPIRejected as error:
+                    self.store.db.execute("UPDATE ai_requests SET status='rejected',result=? WHERE job_id=? AND revision=? AND kind=? AND slot=?",
+                                          (json.dumps({'validation_error': str(error)}, ensure_ascii=False), *key))
+                    raise
                 ident = result.get('request_id')
                 if type(ident) is not int or ident <= 0:
                     raise ProviderError('GenAPI не вернул ID запроса. Проверьте кабинет; платного повтора не будет.')
@@ -184,7 +276,9 @@ class GenAPI:
 
     async def generate_image(self, actor, job, revision, slot, prompt, materials, image_format):
         model = self.settings.genapi_image_model
-        payload = {'prompt': prompt, 'image_urls': [image_uri(m['path']) for m in materials], 'num_images': 1}
+        payload = {'prompt': prompt, 'num_images': 1}
+        if materials:
+            payload['image_urls'] = [image_uri(m['path']) for m in materials]
         if model == 'seedream-v5-lite':
             width, height = FORMATS[image_format]
             payload.update(width=width, height=height, max_images=1, translate_input=False)

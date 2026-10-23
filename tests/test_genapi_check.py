@@ -12,6 +12,26 @@ from publikot.store import Store
 
 
 class DiagnosticTests(unittest.IsolatedAsyncioTestCase):
+    async def test_image_validation_diagnostic_uses_saved_metadata_without_any_network(self):
+        with tempfile.TemporaryDirectory() as temp:
+            settings = Settings('', 1, 42, Path(temp), demo=False)
+            store = Store(settings.database)
+            store.create_project(42, 'Проект')
+            ident, _ = store.create_job(42, 'Тема')
+            store.db.execute("INSERT INTO ai_requests(job_id,revision,kind,slot,model,status,result,request_meta) VALUES (?,1,'image',0,'seedream-v5-lite','rejected',?,?)",
+                (ident, json.dumps({'validation_error': 'width: минимум 1024'}), json.dumps({'width': 512, 'prompt_chars': 100})))
+            try:
+                output = io.StringIO()
+                with patch('publikot.genapi_check.aiohttp.ClientSession') as factory, contextlib.redirect_stdout(output):
+                    await check(settings, ident, 'image', 0)
+                factory.assert_not_called()
+                report = json.loads(output.getvalue())
+                self.assertEqual(report['submitted']['width'], 512)
+                self.assertEqual(report['rejection'], 'width: минимум 1024')
+                self.assertEqual(report['kind'], 'image')
+            finally:
+                store.db.close()
+
     async def test_diagnostic_reads_real_request_and_does_not_write_or_reveal_contents(self):
         with tempfile.TemporaryDirectory() as temp:
             settings = Settings('', 1, 42, Path(temp), demo=False, genapi_key='PRIVATE-API-KEY')

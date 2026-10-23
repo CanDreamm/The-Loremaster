@@ -417,6 +417,13 @@ class VkBot(BotMenus):
         if slot is not None and not 0 <= slot < len(images):
             raise Conflict('Изображение не найдено.')
         saved_slots = [r[0] for r in s.db.execute("SELECT slot FROM ai_requests WHERE job_id=? AND revision=? AND kind='image'", (ident, revision))]
+        if s.db.execute("SELECT 1 FROM ai_requests WHERE job_id=? AND revision=? AND kind='image' AND status='submitting' AND request_id=''", (ident, revision)).fetchone():
+            return await self.client.send(peer,
+                'У предыдущего запроса изображений не сохранён ID. Старый бот не различал отказ HTTP 422 и потерю ответа. '
+                'Проверьте историю в кабинете GenAPI. Если запрос был отклонён или вы согласны на новую оплату, '
+                'можно создать новую попытку изображений. Текст и известные результаты сохранятся.',
+                keyboard=keyboard([{'action': {'type': 'callback', 'label': 'Создать новую попытку',
+                    'payload': json.dumps({'action': 'newimages', 'job': ident, 'revision': revision})}}], back(job['project_id'])))
         slots = [slot] if slot is not None else sorted(set(saved_slots) | set(range(len(images), count)))
         if not slots:
             return await self.preview(actor, peer, ident)
@@ -486,6 +493,9 @@ class VkBot(BotMenus):
             s.select_job(actor, ident)
             return await self.generate(actor, peer, '/resume', '', {})
         job = s.expect_review(actor, ident, revision)
+        if action == 'newimages':
+            s.replace_images(actor, ident, revision, version_images(s.revision(actor, ident)), retry_unknown=True)
+            return await self.generate_images(actor, peer, ident, revision + 1)
         if action == 'generateimages':
             return await self.generate_images(actor, peer, ident, revision)
         if action.startswith('regenimage'):

@@ -7,11 +7,11 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
-from publikot.genapi import GenAPI, image_uri, extract_text
+from publikot.genapi import GenAPI, GenAPIRejected, image_uri, extract_text, validation_details
 from publikot.media import version_images
 from publikot.providers import ProviderError
 from publikot.settings import Settings
-from publikot.store import Store
+from publikot.store import Store, Conflict
 from publikot.vk_bot import VkBot
 
 PNG = b'\x89PNG\r\n\x1a\n' + b'test-image'
@@ -99,6 +99,109 @@ class GenAPITests(unittest.IsolatedAsyncioTestCase):
                 await self.ai.run(42, ident, 1, 'text', 0, 'gpt-6-luna', {})
             self.assertNotIn('private-key', str(caught.exception))
             self.assertEqual(self.session.request.call_count, before + 1)
+
+    async def test_documented_validation_rejection_is_saved_and_explicit_retry_survives_restart(self):
+        self.session.request.side_effect = [response({'error': True, 'errors_validation': {
+            'width': ['The width field must be at least 1024. private-key'],
+            'image_urls.0': ['The image_urls.0 must be a valid URL. https://secret.example/token'],
+            'private-key': ['secret']}}, 422)]
+        with self.assertRaises(GenAPIRejected) as caught:
+            await self.ai.run(42, self.job, 1, 'image', 0, 'seedream-v5-lite',
+                              {'prompt': 'PRIVATE-PROMPT', 'width': 512, 'image_urls': ['PRIVATE-REFERENCE']})
+        message = str(caught.exception)
+        self.assertIn('seedream-v5-lite', message)
+        self.assertIn('width: минимум 1024', message)
+        self.assertIn('image_urls.0', message)
+        self.assertNotIn('private-key', message)
+        self.assertNotIn('secret.example', message)
+        self.assertEqual(self.session.request.call_count, 1)
+        row = self.store.db.execute('SELECT * FROM ai_requests').fetchone()
+        self.assertEqual(row['status'], 'rejected')
+        metadata = json.loads(row['request_meta'])
+        self.assertEqual(metadata['prompt_chars'], len('PRIVATE-PROMPT'))
+        self.assertEqual(metadata['reference_count'], 1)
+        for secret in ('PRIVATE-PROMPT', 'PRIVATE-REFERENCE', 'private-key'):
+            self.assertNotIn(secret, row['request_meta'] + row['result'])
+        self.store.db.close()
+        self.store = Store(self.settings.database)
+        self.ai.store = self.store
+        self.session.request.side_effect = [response({'request_id': 700}),
+            response({'status': 'success', 'result': ['https://cdn.example/img.png']})]
+        await self.ai.run(42, self.job, 1, 'image', 0, 'seedream-v5-lite', {'width': 1024})
+        row = self.store.db.execute('SELECT * FROM ai_requests').fetchone()
+        self.assertEqual(row['status'], 'success')
+        self.assertEqual(row['request_id'], '700')
+        self.assertEqual(json.loads(row['request_meta'])['width'], 1024)
+
+    async def test_undocumented_422_or_get_rejection_never_unlocks_paid_request(self):
+        self.session.request.side_effect = [response({'error': True, 'errors': {'width': ['invalid']}}, 422)]
+        with self.assertRaises(ProviderError):
+            await self.ai.run(42, self.job, 1, 'image', 0, 'seedream-v5-lite', {})
+        with self.assertRaises(ProviderError):
+            await self.ai.run(42, self.job, 1, 'image', 0, 'seedream-v5-lite', {})
+        self.assertEqual(self.session.request.call_count, 1)
+        self.assertEqual(self.store.db.execute('SELECT status FROM ai_requests').fetchone()[0], 'submitting')
+        self.session.request.side_effect = [response({'error': True, 'errors_validation': {'width': ['required']}}, 422)]
+        with self.assertRaises(ProviderError) as caught:
+            await self.ai.request(self.session, 'GET', '/request/get/123')
+        self.assertNotIsInstance(caught.exception, GenAPIRejected)
+
+    def test_validation_messages_only_extract_known_rules_and_fields(self):
+        self.assertEqual(validation_details({'errors_validation': {'prompt': ['PRIVATE-TEXT'],
+            'width': ['The width field must not be greater than 2048.'],
+            'height': ['The height must be an integer.'], 'https://secret': ['required']}}),
+            ['prompt: отклонено', 'width: максимум 2048', 'height: нужно целое число'])
+
+    async def test_old_unknown_image_requires_explicit_new_attempt_and_keeps_known_ids(self):
+        self.store.configure(42, 'image_count', 2)
+        self.store.db.execute('UPDATE jobs SET generation_context=? WHERE id=?',
+            (json.dumps({'project': dict(self.store.require(42, self.project))}), self.job))
+        self.store.save_version(42, self.job, 1, 'Согласованный текст', False)
+        self.store.db.execute("INSERT INTO ai_requests(job_id,revision,kind,slot,model,status) VALUES (?,1,'image',0,'seedream-v5-lite','submitting')", (self.job,))
+        self.store.db.execute("INSERT INTO ai_requests(job_id,revision,kind,slot,model,status,request_id,result,local_path) VALUES (?,1,'image',1,'seedream-v5-lite','success','711',?,?)",
+            (self.job, json.dumps({'result': ['https://cdn.example/saved.png']}), str(self.ref)))
+        client = SimpleNamespace(send=AsyncMock(), send_photo=AsyncMock())
+        bot = VkBot(self.settings, self.store, client, text_ai=self.ai, image_ai=self.ai)
+        await bot.generate_images(42, 42, self.job, 1)
+        self.session.request.assert_not_called()
+        self.assertIn('новую оплату', client.send.call_args.args[1])
+        self.session.request.side_effect = [response({'request_id': 712}),
+            response({'status': 'success', 'result': ['https://cdn.example/new.png']})]
+        self.session.get.return_value = response()
+        payload = {'action': 'newimages', 'job': self.job, 'revision': 1}
+        await bot.action(42, 42, payload)
+        self.assertEqual(self.store.revision(42, self.job)['body'], 'Согласованный текст')
+        self.assertEqual(len(version_images(self.store.revision(42, self.job))), 2)
+        self.assertEqual(sum(c.args[0] == 'POST' for c in self.session.request.call_args_list), 1)
+        self.assertEqual(self.store.db.execute("SELECT status FROM ai_requests WHERE revision=1 AND slot=0").fetchone()[0], 'submitting')
+        before = self.session.request.call_count
+        with self.assertRaises(Conflict):  # stale confirmation must not create another generation
+            await bot.action(42, 42, payload)
+        self.assertEqual(self.session.request.call_count, before)
+
+    async def test_explicit_retry_also_replaces_an_existing_image_with_unknown_regeneration(self):
+        self.store.db.execute('UPDATE jobs SET generation_context=? WHERE id=?',
+            (json.dumps({'project': dict(self.store.require(42, self.project))}), self.job))
+        self.store.save_version(42, self.job, 1, 'Текст', False)
+        self.store.replace_images(42, self.job, 1, [str(self.ref)])
+        self.store.db.execute("INSERT INTO ai_requests(job_id,revision,kind,slot,model,status) VALUES (?,2,'image',0,'seedream-v5-lite','submitting')", (self.job,))
+        self.session.request.side_effect = [response({'request_id': 713}),
+            response({'status': 'success', 'result': ['https://cdn.example/new.png']})]
+        self.session.get.return_value = response()
+        bot = VkBot(self.settings, self.store, SimpleNamespace(send=AsyncMock(), send_photo=AsyncMock()),
+                    text_ai=self.ai, image_ai=self.ai)
+        await bot.action(42, 42, {'action': 'newimages', 'job': self.job, 'revision': 2})
+        images = version_images(self.store.revision(42, self.job))
+        self.assertEqual(len(images), 1)
+        self.assertNotEqual(images[0], str(self.ref))
+        self.assertEqual(sum(c.args[0] == 'POST' for c in self.session.request.call_args_list), 1)
+
+    async def test_optional_reference_field_is_omitted_without_materials(self):
+        self.session.request.side_effect = [response({'request_id': 102}),
+            response({'status': 'success', 'result': ['https://cdn.example/picture.png']})]
+        self.session.get.return_value = response()
+        await self.ai.generate_image(42, self.job, 1, 0, 'Сцена', [], 'square')
+        self.assertNotIn('image_urls', self.session.request.call_args_list[0].kwargs['json'])
 
     async def test_image_payload_limits_to_one_output_and_saves_download_locally(self):
         self.session.request.side_effect = [response({'request_id': 102}),

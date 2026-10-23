@@ -53,26 +53,35 @@ def payload_summary(context, model):
             'feedback_chars': len(context['feedback']), 'references': references}
 
 
-async def check(settings, job_id=None):
+async def check(settings, job_id=None, kind='text', slot=None):
     database = settings.database
     if not database.is_file():
         raise ProviderError('База выбранного BOT_TRANSPORT не найдена. Проверьте DATA_DIR.')
     with sqlite3.connect(database.as_uri() + '?mode=ro', uri=True) as db:
         db.row_factory = sqlite3.Row
         sql = ("SELECT r.*,j.generation_context FROM ai_requests r JOIN jobs j ON j.id=r.job_id "
-               "WHERE r.kind='text'" + (' AND r.job_id=?' if job_id is not None else '') +
-               ' ORDER BY r.job_id DESC,r.revision DESC LIMIT 1')
-        row = db.execute(sql, (job_id,) if job_id is not None else ()).fetchone()
+               'WHERE r.kind=?' + (' AND r.job_id=?' if job_id is not None else '') +
+               (' AND r.slot=?' if slot is not None else '') +
+               ' ORDER BY r.job_id DESC,r.revision DESC,r.slot DESC LIMIT 1')
+        params = (kind,) + ((job_id,) if job_id is not None else ()) + ((slot,) if slot is not None else ())
+        row = db.execute(sql, params).fetchone()
     if not row:
-        raise ProviderError('Сохранённых текстовых запросов GenAPI не найдено.')
+        raise ProviderError('Сохранённых запросов GenAPI выбранного типа не найдено.')
     report = {'transport': settings.transport, 'job': row['job_id'], 'revision': row['revision'],
+              'kind': row['kind'], 'slot': row['slot'], 'model': row['model'],
               'request_id': row['request_id'], 'cached_status': row['status']}
-    if row['generation_context']:
+    if 'request_meta' in row.keys() and row['request_meta']:
+        report['submitted'] = json.loads(row['request_meta'])
+    if row['status'] == 'rejected' and row['result']:
+        report['rejection'] = json.loads(row['result']).get('validation_error', '')
+    if kind == 'text' and row['generation_context']:
         try:
             report['outgoing'] = payload_summary(json.loads(row['generation_context']), row['model'])
         except (ProviderError, KeyError, ValueError, OSError):
             report['outgoing'] = {'error': 'Не удалось проверить сохранённые настройки или файлы референсов.'}
     print(json.dumps(report, ensure_ascii=False, indent=2))
+    if row['status'] == 'rejected':
+        return
     if not row['request_id'] or not str(row['request_id']).isdecimal():
         raise ProviderError('ID не сохранён. Проверьте историю в кабинете. Новая генерация не отправляется.')
     if not settings.genapi_key:
@@ -87,9 +96,11 @@ async def check(settings, job_id=None):
 def main():
     parser = argparse.ArgumentParser(description='Проверка существующего GenAPI запроса без новой генерации и изменения базы.')
     parser.add_argument('--job', type=int, help='Номер задания; по умолчанию последний текстовый запрос.')
+    parser.add_argument('--kind', choices=('text', 'image'), default='text', help='Тип запроса.')
+    parser.add_argument('--slot', type=int, choices=range(3), help='Индекс изображения: 0, 1 или 2.')
     args = parser.parse_args()
     try:
-        asyncio.run(check(Settings.load(require_owner=False), args.job))
+        asyncio.run(check(Settings.load(require_owner=False), args.job, args.kind, args.slot))
     except (ConfigError, ProviderError) as error:
         parser.exit(1, str(error) + '\n')
     except (sqlite3.Error, ValueError, OSError):

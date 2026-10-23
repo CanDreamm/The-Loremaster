@@ -144,6 +144,8 @@ class Store(PlatformStore):
             kind TEXT NOT NULL, slot INTEGER NOT NULL, model TEXT NOT NULL, status TEXT NOT NULL,
             request_id TEXT NOT NULL DEFAULT '', result TEXT NOT NULL DEFAULT '',
             local_path TEXT NOT NULL DEFAULT '', PRIMARY KEY(job_id,revision,kind,slot))''')
+        if 'request_meta' not in {r['name'] for r in self.db.execute('PRAGMA table_info(ai_requests)')}:
+            self.db.execute("ALTER TABLE ai_requests ADD COLUMN request_meta TEXT NOT NULL DEFAULT ''")
         # Не повторяем внешние операции с неизвестным результатом после перезапуска.
         self.db.execute("UPDATE jobs SET status='unknown' WHERE status='publishing'")
         # Image generation never removes the approved text. Its request IDs survive restart.
@@ -458,12 +460,14 @@ class Store(PlatformStore):
             images[slot] = path
         self.replace_images(actor, ident, revision, images)
 
-    def replace_images(self, actor, ident, revision, images):
+    def replace_images(self, actor, ident, revision, images, *, retry_unknown=False):
         from .media import paths
         images = paths(images)
         path = images[0] if images else None
         with self.transaction():
             self.expect_review(actor, ident, revision)
+            if retry_unknown and not self.db.execute("SELECT 1 FROM ai_requests WHERE job_id=? AND revision=? AND kind='image' AND status='submitting' AND request_id=''", (ident, revision)).fetchone():
+                raise Conflict('Нет запроса изображений с потерянным ID. Откройте задание заново.')
             old = self.revision(actor, ident)
             next_revision = revision + 1
             self.db.execute('INSERT INTO versions(job_id,revision,body,is_demo,image_path) VALUES (?,?,?,?,?)', (ident, next_revision, old['body'], old['is_demo'], path))
@@ -473,6 +477,17 @@ class Store(PlatformStore):
             self.db.execute('UPDATE jobs SET image_paths=? WHERE id=?', (json.dumps(images), ident))
             self.db.execute('UPDATE versions SET image_paths=? WHERE job_id=? AND revision=?',
                             (json.dumps(images), ident, next_revision))
+            if retry_unknown:
+                # Preserve completed/pending known requests, never pay for them again.
+                # Unknown requests stay in the previous revision for audit/history checks.
+                self.db.execute('''INSERT INTO ai_requests(job_id,revision,kind,slot,model,status,request_id,result,local_path,request_meta)
+                    SELECT job_id,?,kind,slot,model,status,request_id,result,local_path,request_meta
+                    FROM ai_requests WHERE job_id=? AND revision=? AND kind='image'
+                    AND (request_id<>'' OR status='rejected')''', (next_revision, ident, revision))
+                self.db.execute('''INSERT INTO ai_requests(job_id,revision,kind,slot,model,status)
+                    SELECT job_id,?,kind,slot,model,'retry_authorized' FROM ai_requests
+                    WHERE job_id=? AND revision=? AND kind='image' AND status='submitting' AND request_id=''
+                    ''', (next_revision, ident, revision))
 
     def claim(self, owner, ident, revision):
         with self.transaction():

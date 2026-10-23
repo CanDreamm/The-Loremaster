@@ -34,6 +34,41 @@ class Messages:
 
 
 class GenAPIWholeStack(unittest.IsolatedAsyncioTestCase):
+    async def test_native_http_validation_body_is_reported_and_only_explicit_action_retries(self):
+        with tempfile.TemporaryDirectory() as temp:
+            settings = Settings('', 1, 42, Path(temp), demo=False, genapi_key='private-key')
+            store = Store(settings.database)
+            store.create_project(42, 'Проект')
+            job, _ = store.create_job(42, 'Тема')
+            submitted = []
+
+            async def service(request):
+                if request.method == 'POST':
+                    submitted.append(await request.json())
+                    # The official native contract names this errors_validation.
+                    # The numeric constraint here is a test fixture, not a Seedream specification.
+                    if len(submitted) == 1:
+                        return web.json_response({'error': True, 'errors_validation': {
+                            'prompt': ['The prompt field must not be greater than 3000 characters.']}}, status=422)
+                    return web.json_response({'request_id': 123, 'status': 'processing'})
+                return web.json_response({'status': 'success', 'result': ['https://cdn.example/img.png']})
+
+            app = web.Application()
+            app.router.add_route('*', '/{tail:.*}', service)
+            try:
+                async with TestServer(app) as server:
+                    with patch('publikot.genapi.BASE', str(server.make_url('/api/v1')).rstrip('/')):
+                        ai = GenAPI(settings, store, poll_interval=0)
+                        with self.assertRaises(ProviderError) as caught:
+                            await ai.run(42, job, 1, 'image', 0, 'seedream-v5-lite', {'prompt': 'x' * 3001})
+                        self.assertIn('prompt: максимум 3000', str(caught.exception))
+                        self.assertEqual(len(submitted), 1)
+                        result = await ai.run(42, job, 1, 'image', 0, 'seedream-v5-lite', {'prompt': 'x' * 3000})
+                        self.assertEqual(result['result'], ['https://cdn.example/img.png'])
+                        self.assertEqual(len(submitted), 2)
+            finally:
+                store.db.close()
+
     async def test_project_members_settings_generation_three_images_and_two_destinations(self):
         for transport in ('vk', 'telegram'):
             with self.subTest(transport=transport), tempfile.TemporaryDirectory() as temp:
