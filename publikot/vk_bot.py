@@ -416,8 +416,8 @@ class VkBot(BotMenus):
         images = version_images(old)
         if slot is not None and not 0 <= slot < len(images):
             raise Conflict('Изображение не найдено.')
-        saved_slots = [r[0] for r in s.db.execute("SELECT slot FROM ai_requests WHERE job_id=? AND revision=? AND kind='image'", (ident, revision))]
-        if s.db.execute("SELECT 1 FROM ai_requests WHERE job_id=? AND revision=? AND kind='image' AND status='submitting' AND request_id=''", (ident, revision)).fetchone():
+        saved_slots = [r[0] for r in s.db.execute("SELECT slot FROM ai_requests WHERE job_id=? AND revision=? AND kind IN ('image','image_prompt')", (ident, revision))]
+        if s.db.execute("SELECT 1 FROM ai_requests WHERE job_id=? AND revision=? AND kind IN ('image','image_prompt') AND status='submitting' AND request_id=''", (ident, revision)).fetchone():
             return await self.client.send(peer,
                 'У предыдущего запроса изображений не сохранён ID. Старый бот не различал отказ HTTP 422 и потерю ответа. '
                 'Проверьте историю в кабинете GenAPI. Если запрос был отклонён или вы согласны на новую оплату, '

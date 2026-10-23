@@ -19,6 +19,7 @@ from publikot.store import Store, Conflict
 from publikot.telegram_bot import TelegramBot
 from publikot.vk_bot import VkBot
 from postmypost_contract import validate_contract
+from genapi_wire import read_generation_request
 
 PNG = b'\x89PNG\r\n\x1a\n' + b'image-bytes'
 ARTICLE = ('Как кот открыл кофейню\n\n' + ('Я расскажу историю от первого лица. ' * 180)).strip()
@@ -85,7 +86,7 @@ class GenAPIWholeStack(unittest.IsolatedAsyncioTestCase):
                     if route.startswith('/gen/'):
                         self.assertEqual(request.headers.get('Authorization'), 'Bearer genapi-private-key')
                         if route.startswith('/gen/networks/'):
-                            data = await request.json()
+                            data = await read_generation_request(self, request)
                             gen_payloads.append((route, data))
                             ident = len(tasks) + 1
                             if route.endswith('/gpt-6-luna'):
@@ -93,15 +94,22 @@ class GenAPIWholeStack(unittest.IsolatedAsyncioTestCase):
                                 self.assertIn('Статья 6000 знаков', data['messages'][0]['content'])
                                 self.assertIn('Тёплый разговорный тон', data['messages'][0]['content'])
                                 self.assertIn('Материал character', data['messages'][0]['content'])
-                                self.assertEqual(len([c for c in data['messages'][1]['content'] if c['type'] == 'image_url']), 2)
+                                self.assertEqual(len([c for c in data['messages'][1]['content'] if c['type'] == 'image_url']),
+                                                 3 if 'Замечания' in data['messages'][0]['content'] else 2)
                                 for block in data['messages'][1]['content']:
                                     if block['type'] == 'image_url':
                                         self.assertEqual(base64.b64decode(block['image_url']['url'].split(',', 1)[1]), PNG)
-                                tasks[ident] = [ARTICLE]
+                                if data['messages'][0]['content'].startswith('Convert the complete publication context'):
+                                    self.assertIn(ARTICLE, data['messages'][0]['content'])
+                                    tasks[ident] = ['Палитра: оранжевая; не рисуй надписей. Кот в кофейне. '
+                                        + ('Замечания: Сделай светлее' if 'Замечания' in data['messages'][0]['content'] else '')]
+                                else:
+                                    tasks[ident] = [ARTICLE]
                             else:
                                 self.assertIn('Палитра: оранжевая', data['prompt'])
                                 self.assertIn('не рисуй надписей', data['prompt'])
-                                self.assertIn(ARTICLE, data['prompt'])
+                                self.assertNotIn(ARTICLE, data['prompt'])
+                                self.assertLessEqual(len(data['prompt']), 2400)
                                 self.assertEqual(len(data['image_urls']), 3 if 'Замечания' in data['prompt'] else 2)
                                 self.assertEqual((data['num_images'], data['max_images']), (1, 1))
                                 self.assertEqual((data['width'], data['height']), (1024, 1024))
@@ -226,7 +234,8 @@ class GenAPIWholeStack(unittest.IsolatedAsyncioTestCase):
                             await bot.generate_images(99, 99, job['id'], 1)
                         self.assertEqual(store.job(99)['status'], 'review')
                         await bot.generate_images(99, 99, job['id'], 1)
-                        self.assertEqual(len(gen_payloads), 4)  # One text + exactly three paid image requests.
+                        self.assertEqual(len(gen_payloads), 7)  # Article + three scene descriptions + three images.
+                        self.assertEqual(sum('/seedream-v5-lite' in route for route, _ in gen_payloads), 3)
                         job = store.job(99)
                         images = version_images(store.revision(99, job['id']))
                         self.assertEqual(len(images), 3)
@@ -236,7 +245,8 @@ class GenAPIWholeStack(unittest.IsolatedAsyncioTestCase):
                         new_images = version_images(store.revision(99, job['id']))
                         self.assertEqual((new_images[0], new_images[2]), (images[0], images[2]))
                         self.assertNotEqual(new_images[1], images[1])
-                        self.assertEqual(len(gen_payloads), 5)
+                        self.assertEqual(len(gen_payloads), 9)
+                        self.assertEqual(sum('/seedream-v5-lite' in route for route, _ in gen_payloads), 4)
                         job = store.job(99)
                         confirmation = {'action': 'publish', 'job': job['id'], 'revision': job['revision']}
                         await bot.action(99, 99, confirmation)

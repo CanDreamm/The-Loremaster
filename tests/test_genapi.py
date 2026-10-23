@@ -7,7 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
-from publikot.genapi import GenAPI, GenAPIRejected, image_uri, extract_text, validation_details
+from publikot.genapi import GenAPI, GenAPIRejected, IMAGE_PROMPT_BUDGET, image_uri, extract_text, validation_details
 from publikot.media import version_images
 from publikot.providers import ProviderError
 from publikot.settings import Settings
@@ -107,7 +107,7 @@ class GenAPITests(unittest.IsolatedAsyncioTestCase):
             'private-key': ['secret']}}, 422)]
         with self.assertRaises(GenAPIRejected) as caught:
             await self.ai.run(42, self.job, 1, 'image', 0, 'seedream-v5-lite',
-                              {'prompt': 'PRIVATE-PROMPT', 'width': 512, 'image_urls': ['PRIVATE-REFERENCE']})
+                              {'prompt': 'PRIVATE-PROMPT', 'width': 512, 'image_urls': [image_uri(self.ref)]})
         message = str(caught.exception)
         self.assertIn('seedream-v5-lite', message)
         self.assertIn('width: минимум 1024', message)
@@ -203,6 +203,76 @@ class GenAPITests(unittest.IsolatedAsyncioTestCase):
         await self.ai.generate_image(42, self.job, 1, 0, 'Сцена', [], 'square')
         self.assertNotIn('image_urls', self.session.request.call_args_list[0].kwargs['json'])
 
+    async def test_long_context_prepares_a_cached_scene_with_full_settings_and_reference(self):
+        prompt = 'Палитра: рыжая. Только один персонаж. Без надписей. Статья: ' + 'Абзац истории. ' * 600
+        scene = 'A single red cat in a warm cafe. Orange palette, no lettering.'
+        self.session.request.side_effect = [response({'request_id': 801}),
+            response({'status': 'success', 'result': [{}], 'full_response': {
+                'choices': [{'message': {'content': scene}}]}}),
+            response({'request_id': 802}),
+            response({'status': 'success', 'result': ['https://cdn.example/image.png']})]
+        self.session.get.return_value = response()
+        materials = [{'role': 'character', 'path': str(self.ref)}]
+        result = await self.ai.generate_image(42, self.job, 1, 0, prompt, materials, 'square')
+        calls = self.session.request.call_args_list
+        self.assertEqual(len(calls), 4)
+        preparation = calls[0].kwargs['json']
+        self.assertIn(prompt, preparation['messages'][0]['content'])
+        self.assertIn('in English', preparation['messages'][0]['content'])
+        self.assertIn('latest correction', preparation['messages'][0]['content'])
+        self.assertEqual(preparation['messages'][1]['content'][2]['image_url']['url'], image_uri(self.ref))
+        self.assertEqual(self.store.db.execute("SELECT result FROM ai_requests WHERE kind='image_prompt'").fetchone()[0],
+                         json.dumps({'result': [scene], 'cost': None}))
+        metadata = json.loads(self.store.db.execute("SELECT request_meta FROM ai_requests WHERE kind='image'").fetchone()[0])
+        self.assertEqual(metadata['prompt_chars'], len(scene))
+        self.assertEqual(metadata['transport'], 'multipart/form-data')
+        self.assertEqual(await self.ai.generate_image(42, self.job, 1, 0, prompt, materials, 'square'), result)
+        self.assertEqual(self.session.request.call_count, 4)
+
+    async def test_preparation_poll_resumes_by_id_and_does_not_repeat_the_paid_text_request(self):
+        prompt = 'Контекст: ' + 'История. ' * 600
+        self.session.request.side_effect = [response({'request_id': 803}), response(status=503)]
+        with self.assertRaises(ProviderError):
+            await self.ai.generate_image(42, self.job, 1, 0, prompt, [], 'square')
+        self.session.request.side_effect = [response({'status': 'success', 'result': ['A cat in a cafe.']}),
+            response({'request_id': 804}), response({'status': 'success', 'result': ['https://cdn.example/image.png']})]
+        self.session.get.return_value = response()
+        await self.ai.generate_image(42, self.job, 1, 0, prompt, [], 'square')
+        posts = [call for call in self.session.request.call_args_list if call.args[0] == 'POST']
+        self.assertEqual(len(posts), 2)
+        self.assertTrue(posts[0].args[1].endswith('/gpt-6-luna'))
+        self.assertTrue(posts[1].args[1].endswith('/seedream-v5-lite'))
+
+    async def test_invalid_scene_output_never_submits_a_paid_image_request(self):
+        for scene in ('', 'x' * (IMAGE_PROMPT_BUDGET + 1)):
+            job, _ = self.store.create_job(42, 'Тема')
+            self.session.request.side_effect = [response({'request_id': 805}),
+                response({'status': 'success', 'result': [scene]})]
+            before = self.session.request.call_count
+            with self.assertRaisesRegex(ProviderError, 'описание сцены'):
+                await self.ai.generate_image(42, job, 1, 0, 'Long context. ' * 500, [], 'square')
+            self.assertEqual(self.session.request.call_count, before + 2)
+            self.assertIsNone(self.store.db.execute("SELECT 1 FROM ai_requests WHERE job_id=? AND kind='image'", (job,)).fetchone())
+
+    async def test_known_image_request_resumes_without_starting_new_scene_preparation(self):
+        self.store.db.execute("INSERT INTO ai_requests(job_id,revision,kind,slot,model,status,request_id) VALUES (?,1,'image',0,'seedream-v5-lite','processing','806')", (self.job,))
+        self.session.request.side_effect = [response({'status': 'success', 'result': ['https://cdn.example/image.png']})]
+        self.session.get.return_value = response()
+        await self.ai.generate_image(42, self.job, 1, 0, 'Long context. ' * 500, [], 'square')
+        self.assertEqual(self.session.request.call_count, 1)
+        self.assertEqual(self.session.request.call_args.args[0], 'GET')
+
+    def test_validation_explanations_preserve_constraint_text_without_echoed_secrets(self):
+        details = validation_details({'errors_validation': {
+            'prompt': ['Длина поля prompt должна составлять от 1 до 2000 символов.'],
+            'image_urls': ['The selected image_urls is invalid. "private-key" https://example.com/private'],
+            'width': ['The width must be a multiple of 16.']}}, payload={'prompt': 'private prompt' * 20}, secret='private-key')
+        text = '\n'.join(details)
+        self.assertIn('от 1 до 2000 символов', text)
+        self.assertIn('multiple of 16', text)
+        self.assertNotIn('private-key', text)
+        self.assertNotIn('https://', text)
+
     async def test_image_payload_limits_to_one_output_and_saves_download_locally(self):
         self.session.request.side_effect = [response({'request_id': 102}),
             response({'status': 'success', 'result': ['https://cdn.example/picture.png']})]
@@ -210,11 +280,13 @@ class GenAPITests(unittest.IsolatedAsyncioTestCase):
         result = await self.ai.generate_image(42, self.job, 1, 0, 'Сцена',
             [{'role': 'style', 'path': str(self.ref)}], 'portrait')
         self.assertEqual(Path(result).read_bytes(), PNG)
-        payload = self.session.request.call_args_list[0].kwargs['json']
+        self.assertTrue(self.session.request.call_args_list[0].kwargs['data'].is_multipart)
+        payload = json.loads(self.store.db.execute('SELECT request_meta FROM ai_requests').fetchone()[0])
         self.assertEqual((payload['width'], payload['height']), (1024, 1536))
         self.assertEqual((payload['num_images'], payload['max_images']), (1, 1))
         self.assertFalse(payload['translate_input'])
-        self.assertEqual(payload['image_urls'], [image_uri(self.ref)])
+        self.assertEqual(payload['reference_count'], 1)
+        self.assertEqual(payload['transport'], 'multipart/form-data')
         self.assertNotIn('headers', self.session.get.call_args.kwargs)
         self.assertFalse(self.session.get.call_args.kwargs['allow_redirects'])
         self.assertEqual(await self.ai.generate_image(42, self.job, 1, 0, 'Сцена', [], 'portrait'), result)

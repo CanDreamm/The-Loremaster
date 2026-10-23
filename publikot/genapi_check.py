@@ -96,7 +96,7 @@ async def check(settings, job_id=None, kind='text', slot=None):
 def main():
     parser = argparse.ArgumentParser(description='Проверка существующего GenAPI запроса без новой генерации и изменения базы.')
     parser.add_argument('--job', type=int, help='Номер задания; по умолчанию последний текстовый запрос.')
-    parser.add_argument('--kind', choices=('text', 'image'), default='text', help='Тип запроса.')
+    parser.add_argument('--kind', choices=('text', 'image', 'image_prompt'), default='text', help='Тип запроса.')
     parser.add_argument('--slot', type=int, choices=range(3), help='Индекс изображения: 0, 1 или 2.')
     args = parser.parse_args()
     try:

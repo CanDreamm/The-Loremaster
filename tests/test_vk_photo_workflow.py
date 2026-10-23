@@ -3,6 +3,7 @@ import base64
 import json
 import tempfile
 import unittest
+from genapi_wire import read_generation_request
 from pathlib import Path
 from unittest.mock import patch
 
@@ -62,7 +63,7 @@ class VkPhotoWorkflow(unittest.IsolatedAsyncioTestCase):
                     return web.Response(body=PNG, content_type='image/png')
                 if request.path.startswith('/gen/networks/'):
                     self.assertEqual(request.headers['Authorization'], 'Bearer genapi-private')
-                    payload = await request.json()
+                    payload = await read_generation_request(self, request)
                     payloads.append(payload)
                     if 'messages' in payload:
                         self.assertIn('Добрый персонаж', payload['messages'][0]['content'])
