@@ -3,6 +3,7 @@ import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
 
+from .database_lock import ExclusiveConnection
 from .prompts import TEXT_TEMPLATE, IMAGE_TEMPLATE, LEGACY_TEXT_TEMPLATE, LEGACY_IMAGE_TEMPLATE
 
 
@@ -16,7 +17,7 @@ from .platform_store import PlatformStore
 class Store(PlatformStore):
     def __init__(self, path: Path):
         path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        self.db = sqlite3.connect(path, isolation_level=None)
+        self.db = sqlite3.connect(path, isolation_level=None, factory=ExclusiveConnection)
         self.db.row_factory = sqlite3.Row
         self.db.execute('PRAGMA foreign_keys=ON')
         self.db.execute('PRAGMA journal_mode=WAL')

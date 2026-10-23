@@ -23,6 +23,41 @@ class StoreTests(unittest.TestCase):
         self.store.save_version(42, ident, 1, 'Текст', demo)
         return ident
 
+    def test_second_store_cannot_interrupt_generation_or_publication(self):
+        from publikot.settings import ConfigError
+        job, _ = self.store.create_job(42, 'Live generation')
+        self.store.begin_event('live-event')
+        with self.assertRaisesRegex(ConfigError, 'База Публикота уже используется'):
+            Store(self.path)
+        self.assertEqual(self.store.job(42, job)['status'], 'generating')
+        self.assertEqual(self.store.db.execute("SELECT status FROM inbox WHERE event_id='live-event'").fetchone()[0], 'processing')
+        self.store.save_version(42, job, 1, 'Completed text', False)
+        self.store.claim(42, job, 1)
+        with self.assertRaises(ConfigError):
+            Store(self.path)
+        self.assertEqual(self.store.job(42, job)['status'], 'publishing')
+        self.store.db.close()
+        self.store = Store(self.path)
+        self.assertEqual(self.store.job(42, job)['status'], 'unknown')
+
+    def test_separate_process_cannot_run_startup_recovery_on_live_database(self):
+        import subprocess
+        import sys
+        job, _ = self.store.create_job(42, 'Active text request')
+        program = (
+            'import sys\nfrom pathlib import Path\n'
+            'from publikot.store import Store\n'
+            'from publikot.settings import ConfigError\n'
+            'try:\n    Store(Path(sys.argv[1]))\n'
+            'except ConfigError:\n    sys.exit(42)\n'
+        )
+        result = subprocess.run([sys.executable, '-c', program, str(self.path)],
+                                capture_output=True, timeout=10)
+        self.assertEqual(result.returncode, 42, result.stderr.decode())
+        self.assertEqual(self.store.job(42, job)['status'], 'generating')
+        self.store.save_version(42, job, 1, 'Paid result preserved', False)
+        self.assertEqual(self.store.revision(42, job)['body'], 'Paid result preserved')
+
     def test_default_templates_update_but_custom_templates_and_image_tasks_survive_restart(self):
         from publikot.prompts import (TEXT_TEMPLATE, IMAGE_TEMPLATE,
                                       LEGACY_TEXT_TEMPLATE, LEGACY_IMAGE_TEMPLATE)
