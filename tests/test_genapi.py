@@ -221,7 +221,7 @@ class GenAPITests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('in English', preparation['messages'][0]['content'])
         self.assertIn('latest correction', preparation['messages'][0]['content'])
         self.assertEqual(preparation['messages'][1]['content'][2]['image_url']['url'], image_uri(self.ref))
-        self.assertEqual(self.store.db.execute("SELECT result FROM ai_requests WHERE kind='image_prompt'").fetchone()[0],
+        self.assertEqual(self.store.db.execute("SELECT result FROM ai_requests WHERE kind='image_prompt_v2'").fetchone()[0],
                          json.dumps({'result': [scene], 'cost': None}))
         metadata = json.loads(self.store.db.execute("SELECT request_meta FROM ai_requests WHERE kind='image'").fetchone()[0])
         self.assertEqual(metadata['prompt_chars'], len(scene))
@@ -261,6 +261,39 @@ class GenAPITests(unittest.IsolatedAsyncioTestCase):
         await self.ai.generate_image(42, self.job, 1, 0, 'Long context. ' * 500, [], 'square')
         self.assertEqual(self.session.request.call_count, 1)
         self.assertEqual(self.session.request.call_args.args[0], 'GET')
+
+    async def test_legacy_draft_and_cached_article_scene_are_not_inputs_to_a_new_image_request(self):
+        project = dict(self.store.require(42, self.project))
+        project['concept'] = 'USER_CONCEPT ' * 300
+        context = {'project': project, 'brief': 'ORIGINAL_USER_TASK',
+                   'materials': [{'kind': 'character', 'path': str(self.ref), 'description': 'CHARACTER_DESCRIPTION'}],
+                   'previous': 'PREVIOUS_ARTICLE_SECRET', 'feedback': 'TEXT_CORRECTION_SECRET'}
+        self.store.db.execute('UPDATE jobs SET generation_context=? WHERE id=?', (json.dumps(context), self.job))
+        self.store.save_version(42, self.job, 1, 'GENERATED_ARTICLE_SECRET', False)
+        self.store.db.execute('UPDATE versions SET image_prompt=? WHERE job_id=?',
+                             ('LEGACY_PROMPT_WITH_ARTICLE_SECRET', self.job))
+        self.store.db.execute("INSERT INTO ai_requests(job_id,revision,kind,slot,model,status,result) VALUES (?,1,'image_prompt',0,'gpt-6-luna','success',?)",
+            (self.job, json.dumps({'result': ['LEGACY_SCENE_WITH_ARTICLE_SECRET']})))
+        self.store.db.execute("INSERT INTO ai_requests(job_id,revision,kind,slot,model,status) VALUES (?,1,'image',0,'seedream-v5-lite','rejected')", (self.job,))
+        self.session.request.side_effect = [response({'request_id': 900}),
+            response({'status': 'success', 'result': ['A scene from the original user task.']}),
+            response({'request_id': 901}), response({'status': 'success', 'result': ['https://cdn.example/new.png']})]
+        self.session.get.return_value = response()
+        bot = VkBot(self.settings, self.store, SimpleNamespace(send=AsyncMock(), send_photo=AsyncMock()),
+                    text_ai=self.ai, image_ai=self.ai)
+        await bot.generate_images(42, 42, self.job, 1)
+        preparation = self.session.request.call_args_list[0].kwargs['json']
+        actual_prompt = preparation['messages'][0]['content']
+        self.assertIn('ORIGINAL_USER_TASK', actual_prompt)
+        self.assertIn('USER_CONCEPT', actual_prompt)
+        self.assertIn('CHARACTER_DESCRIPTION', actual_prompt)
+        for forbidden in ('GENERATED_ARTICLE_SECRET', 'PREVIOUS_ARTICLE_SECRET', 'TEXT_CORRECTION_SECRET',
+                          'LEGACY_PROMPT_WITH_ARTICLE_SECRET', 'LEGACY_SCENE_WITH_ARTICLE_SECRET'):
+            self.assertNotIn(forbidden, actual_prompt)
+        self.assertEqual(preparation['messages'][1]['content'][2]['image_url']['url'], image_uri(self.ref))
+        self.assertIsNotNone(self.store.db.execute("SELECT 1 FROM ai_requests WHERE kind='image_prompt_v2' AND request_id='900'").fetchone())
+        self.assertEqual(self.store.revision(42, self.job)['body'], 'GENERATED_ARTICLE_SECRET')
+        self.assertNotIn('ARTICLE_SECRET', self.store.revision(42, self.job)['image_prompt'])
 
     def test_validation_explanations_preserve_constraint_text_without_echoed_secrets(self):
         details = validation_details({'errors_validation': {

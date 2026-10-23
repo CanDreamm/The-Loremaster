@@ -70,7 +70,7 @@ class VkPhotoWorkflow(unittest.IsolatedAsyncioTestCase):
                         images = [p['image_url']['url'] for p in payload['messages'][1]['content'] if p['type'] == 'image_url']
                     else:
                         images = payload['image_urls']
-                    self.assertEqual(len(images), 2)
+                    self.assertEqual(len(images), 2 if 'messages' in payload else 1)
                     for uri in images:
                         self.assertEqual(base64.b64decode(uri.split(',', 1)[1]), PNG)
                     return web.json_response({'request_id': len(payloads)})

@@ -328,11 +328,13 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(job['image_path'])
         self.assertTrue(job['reference_path'])
         self.assertEqual(self.app.text_ai.generate.call_args.kwargs['prompt'], version['text_prompt'])
-        for value in ('Кофейня', 'Дружелюбно', 'Без эмодзи', 'Акварель', 'Рыжий кот', 'замени фон на синий'):
+        for value in ('Кофейня', 'Дружелюбно', 'Акварель', 'Рыжий кот', 'замени фон на синий'):
             self.assertIn(value, version['text_prompt'])
             self.assertIn(value, version['image_prompt'])
+        self.assertIn('Без эмодзи', version['text_prompt'])
+        self.assertNotIn('Без эмодзи', version['image_prompt'])
         self.assertIn('Квадратный формат', version['image_prompt'])
-        self.assertIn('Наш кофе готов!', version['image_prompt'])
+        self.assertNotIn('Наш кофе готов!', version['image_prompt'])
         self.assertEqual(json.loads(version['prompt_materials']), [
             {'role': 'character', 'path': '/cat.jpg'},
             {'role': 'reference', 'path': job['reference_path']}])

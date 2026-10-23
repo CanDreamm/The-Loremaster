@@ -99,8 +99,8 @@ class GenAPIWholeStack(unittest.IsolatedAsyncioTestCase):
                                 for block in data['messages'][1]['content']:
                                     if block['type'] == 'image_url':
                                         self.assertEqual(base64.b64decode(block['image_url']['url'].split(',', 1)[1]), PNG)
-                                if data['messages'][0]['content'].startswith('Convert the complete publication context'):
-                                    self.assertIn(ARTICLE, data['messages'][0]['content'])
+                                if data['messages'][0]['content'].startswith('Convert the original user task'):
+                                    self.assertNotIn(ARTICLE, data['messages'][0]['content'])
                                     tasks[ident] = ['Палитра: оранжевая; не рисуй надписей. Кот в кофейне. '
                                         + ('Замечания: Сделай светлее' if 'Замечания' in data['messages'][0]['content'] else '')]
                                 else:
@@ -233,7 +233,7 @@ class GenAPIWholeStack(unittest.IsolatedAsyncioTestCase):
                             await bot.generate_images(99, 99, job['id'], 1)
                         self.assertEqual(store.job(99)['status'], 'review')
                         await bot.generate_images(99, 99, job['id'], 1)
-                        self.assertEqual(len(gen_payloads), 7)  # Article + three scene descriptions + three images.
+                        self.assertEqual(len(gen_payloads), 4)  # Article + three images, no article-based scene preparation.
                         self.assertEqual(sum('/seedream-v5-lite' in route for route, _ in gen_payloads), 3)
                         job = store.job(99)
                         images = version_images(store.revision(99, job['id']))
@@ -244,7 +244,7 @@ class GenAPIWholeStack(unittest.IsolatedAsyncioTestCase):
                         new_images = version_images(store.revision(99, job['id']))
                         self.assertEqual((new_images[0], new_images[2]), (images[0], images[2]))
                         self.assertNotEqual(new_images[1], images[1])
-                        self.assertEqual(len(gen_payloads), 9)
+                        self.assertEqual(len(gen_payloads), 5)
                         self.assertEqual(sum('/seedream-v5-lite' in route for route, _ in gen_payloads), 4)
                         job = store.job(99)
                         confirmation = {'action': 'publish', 'job': job['id'], 'revision': job['revision']}

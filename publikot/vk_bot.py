@@ -5,7 +5,7 @@ import uuid
 from .providers import AmbiguousPublish, ProviderError, VkPublisher, YandexText
 from .store import Conflict
 from .menus import BotMenus, button as menu_button, keyboard, back
-from .prompts import build_prompts
+from .prompts import build_prompts, build_image_prompt
 from .browser_publish import BrowserPublisher, profile_path
 from .platforms import Platforms
 from .genapi import GenAPI
@@ -200,7 +200,7 @@ class VkBot(BotMenus):
         if version['is_demo']:
             label += 'ДЕМО: публикация запрещена.\n'
         if job['reference_path']:
-            label += 'Фото-референс сохранено для промпта изображения и не включено в публикацию.\n'
+            label += 'Фото из задания сохранено для подготовки текста и не включено в публикацию.\n'
         context = json.loads(job['generation_context'] or '{}')
         desired = context.get('project', {}).get('image_count', 0)
         label += f'Изображений: {len(version_images(version))}' + (f' из {desired}' if desired else '') + '.\n'
@@ -394,8 +394,6 @@ class VkBot(BotMenus):
             await self.client.send(peer, 'Формирую промпты и готовлю текст. Без подтверждения пост не публикуется.')
             options = {'materials': prompts.materials, 'request_key': (actor, ident, revision)} if isinstance(self.text_ai, GenAPI) else {}
             body = await self.text_ai.generate(project['concept'], brief, previous, feedback, prompt=prompts.text, **options)
-            prompts = build_prompts(project, brief, materials, context['reference'], previous, feedback,
-                                    '' if self.settings.demo else body)
             s.save_version(actor, ident, revision, body, self.settings.demo, prompts=prompts)
         except Exception:
             if ident is not None:
@@ -417,8 +415,8 @@ class VkBot(BotMenus):
         images = version_images(old)
         if slot is not None and not 0 <= slot < len(images):
             raise Conflict('Изображение не найдено.')
-        saved_slots = [r[0] for r in s.db.execute("SELECT slot FROM ai_requests WHERE job_id=? AND revision=? AND kind IN ('image','image_prompt')", (ident, revision))]
-        if s.db.execute("SELECT 1 FROM ai_requests WHERE job_id=? AND revision=? AND kind IN ('image','image_prompt') AND status='submitting' AND request_id=''", (ident, revision)).fetchone():
+        saved_slots = [r[0] for r in s.db.execute("SELECT slot FROM ai_requests WHERE job_id=? AND revision=? AND kind IN ('image','image_prompt_v2')", (ident, revision))]
+        if s.db.execute("SELECT 1 FROM ai_requests WHERE job_id=? AND revision=? AND kind IN ('image','image_prompt_v2') AND status='submitting' AND request_id=''", (ident, revision)).fetchone():
             return await self.client.send(peer,
                 'У предыдущего запроса изображений не сохранён ID. Старый бот не различал отказ HTTP 422 и потерю ответа. '
                 'Проверьте историю в кабинете GenAPI. Если запрос был отклонён или вы согласны на новую оплату, '
@@ -432,11 +430,15 @@ class VkBot(BotMenus):
         s.db.execute("UPDATE jobs SET status='generating' WHERE id=?", (ident,))
         completed = False
         try:
-            await self.client.send(peer, 'Создаю изображения по согласованному тексту и референсам проекта. Это может занять несколько минут.')
-            materials = json.loads(old['prompt_materials'] or '[]')
+            await self.client.send(peer, 'Создаю изображения по заданию, концепции проекта и фото персонажей. Это может занять несколько минут.')
+            # Rebuild even legacy drafts: their saved image_prompt can contain the generated article.
+            source_materials = context.get('materials', json.loads(old['prompt_materials'] or '[]'))
+            base_prompt = build_image_prompt(project, context.get('brief', job['brief']), source_materials)
+            materials = [{'role': 'character', 'path': m['path']} for m in source_materials
+                         if m and m.get('kind', m.get('role')) == 'character']
             for index in slots:
-                prompt = old['image_prompt'] + f'\n\nИллюстрация {index + 1} из {count}. '
-                prompt += 'Выбери отдельный эпизод публикации; сохрани общих персонажей, стиль и палитру. '
+                prompt = base_prompt + f'\n\nИллюстрация {index + 1} из {count}. '
+                prompt += 'Выбери сцену по заданию пользователя; сохрани общих персонажей, стиль и палитру концепции. '
                 prompt += 'Входные изображения по порядку: ' + ', '.join(m['role'] for m in materials) + '.'
                 if feedback:
                     prompt += '\nЗамечания к этому изображению:\n' + feedback
@@ -455,7 +457,7 @@ class VkBot(BotMenus):
         finally:
             s.db.execute("UPDATE jobs SET status='review' WHERE id=? AND status='generating'", (ident,))
         if completed:
-            s.replace_images(actor, ident, revision, images)
+            s.replace_images(actor, ident, revision, images, image_prompt=base_prompt)
         await self.preview(actor, peer, ident)
 
     async def connect(self, actor, peer, project_id):

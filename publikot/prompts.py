@@ -54,6 +54,18 @@ def text_volume_policy(project, brief, feedback):
         + 'Манеру речи, рассказчика и оформление бери из концепции проекта.')
 
 
+def build_image_prompt(project, brief, materials=()):
+    characters = '\n\n'.join('Фото персонажей: материал проекта.' +
+        ('\nОписание: ' + m.get('description', '') if m.get('description') else '')
+        for m in materials if m and m.get('kind', m.get('role')) == 'character')
+    return '\n\n'.join(filter(None, (
+        project['image_template'],
+        'Концепция проекта:\n' + project['concept'] if project.get('concept') else '',
+        'Правила изображения:\n' + project['image_prompt'] if project.get('image_prompt') else '',
+        characters, 'Задание пользователя:\n' + brief,
+    )))
+
+
 def build_prompts(project, brief, materials=(), reference_path=None, previous='', feedback='', body=''):
     context = '\n\n'.join(f'{label}:\n{project[key]}' for key, label in (
         ('concept', 'Концепция проекта'), ('text_prompt', 'Правила для текста'),
@@ -80,10 +92,6 @@ def build_prompts(project, brief, materials=(), reference_path=None, previous=''
         'Исправления текста:\n' + feedback if feedback else '',
         text_volume_policy(project, brief, feedback),
     )))
-    image = '\n\n'.join(filter(None, (
-        project['image_template'], context,
-        'Правила изображения:\n' + project['image_prompt'] if project.get('image_prompt') else '',
-        material_context, 'Задание пользователя:\n' + brief,
-        'Согласуемый текст публикации:\n' + body if body else '',
-    )))
+    # body is accepted for compatibility; generated publication text is never an image input.
+    image = build_image_prompt(project, brief, materials)
     return PublicationPrompts(text, image, inputs)

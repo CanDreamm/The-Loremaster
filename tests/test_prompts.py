@@ -47,3 +47,14 @@ class TextVolumeTests(unittest.TestCase):
             self.assertNotIn('REMOVED-', prompt)
         self.assertEqual(prompts.materials, [{'role': 'character', 'path': '/cat.png'}])
 
+    def test_image_prompt_does_not_depend_on_generated_publication_or_text_corrections(self):
+        project = {**self.project, 'concept': 'Концепция персонажа', 'text_prompt': 'TEXT_ONLY_RULE'}
+        prompts = build_prompts(project, 'Исходное задание', reference_path='/task-photo.png',
+            previous='PREVIOUS_GENERATED_TEXT', feedback='TEXT_CORRECTION', body='NEW_GENERATED_TEXT')
+        self.assertIn('Исходное задание', prompts.image)
+        self.assertIn('Концепция персонажа', prompts.image)
+        for excluded in ('TEXT_ONLY_RULE', 'PREVIOUS_GENERATED_TEXT', 'TEXT_CORRECTION',
+                         'NEW_GENERATED_TEXT', 'Дополнительный референс'):
+            self.assertNotIn(excluded, prompts.image)
+        self.assertEqual(prompts.image, build_prompts(project, 'Исходное задание', body='DIFFERENT_TEXT').image)
+

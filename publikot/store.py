@@ -476,19 +476,19 @@ class Store(PlatformStore):
             images[slot] = path
         self.replace_images(actor, ident, revision, images)
 
-    def replace_images(self, actor, ident, revision, images, *, retry_unknown=False):
+    def replace_images(self, actor, ident, revision, images, *, retry_unknown=False, image_prompt=None):
         from .media import paths
         images = paths(images)
         path = images[0] if images else None
         with self.transaction():
             self.expect_review(actor, ident, revision)
-            if retry_unknown and not self.db.execute("SELECT 1 FROM ai_requests WHERE job_id=? AND revision=? AND kind IN ('image','image_prompt') AND status='submitting' AND request_id=''", (ident, revision)).fetchone():
+            if retry_unknown and not self.db.execute("SELECT 1 FROM ai_requests WHERE job_id=? AND revision=? AND kind IN ('image','image_prompt_v2') AND status='submitting' AND request_id=''", (ident, revision)).fetchone():
                 raise Conflict('Нет запроса изображений с потерянным ID. Откройте задание заново.')
             old = self.revision(actor, ident)
             next_revision = revision + 1
             self.db.execute('INSERT INTO versions(job_id,revision,body,is_demo,image_path) VALUES (?,?,?,?,?)', (ident, next_revision, old['body'], old['is_demo'], path))
             self.db.execute('UPDATE versions SET text_prompt=?,image_prompt=?,prompt_materials=? WHERE job_id=? AND revision=?',
-                (old['text_prompt'], old['image_prompt'], old['prompt_materials'], ident, next_revision))
+                (old['text_prompt'], old['image_prompt'] if image_prompt is None else image_prompt, old['prompt_materials'], ident, next_revision))
             self.db.execute('UPDATE jobs SET revision=?,image_path=? WHERE id=?', (next_revision, path, ident))
             self.db.execute('UPDATE jobs SET image_paths=? WHERE id=?', (json.dumps(images), ident))
             self.db.execute('UPDATE versions SET image_paths=? WHERE job_id=? AND revision=?',
@@ -498,11 +498,11 @@ class Store(PlatformStore):
                 # Unknown requests stay in the previous revision for audit/history checks.
                 self.db.execute('''INSERT INTO ai_requests(job_id,revision,kind,slot,model,status,request_id,result,local_path,request_meta)
                     SELECT job_id,?,kind,slot,model,status,request_id,result,local_path,request_meta
-                    FROM ai_requests WHERE job_id=? AND revision=? AND kind IN ('image','image_prompt')
+                    FROM ai_requests WHERE job_id=? AND revision=? AND kind IN ('image','image_prompt_v2')
                     AND (request_id<>'' OR status='rejected')''', (next_revision, ident, revision))
                 self.db.execute('''INSERT INTO ai_requests(job_id,revision,kind,slot,model,status)
                     SELECT job_id,?,kind,slot,model,'retry_authorized' FROM ai_requests
-                    WHERE job_id=? AND revision=? AND kind IN ('image','image_prompt') AND status='submitting' AND request_id=''
+                    WHERE job_id=? AND revision=? AND kind IN ('image','image_prompt_v2') AND status='submitting' AND request_id=''
                     ''', (next_revision, ident, revision))
 
     def claim(self, owner, ident, revision):
