@@ -3,6 +3,8 @@ import base64
 import json
 import tempfile
 import unittest
+from io import BytesIO
+from PIL import Image
 from genapi_wire import read_generation_request
 from pathlib import Path
 from unittest.mock import patch
@@ -18,7 +20,9 @@ from publikot.store import Store
 from publikot.vk_bot import VkBot
 from publikot.vk_client import VkMessages
 
-PNG = b'\x89PNG\r\n\x1a\nphoto'
+_image = BytesIO()
+Image.new('RGB', (128, 96), 'orange').save(_image, format='PNG')
+PNG = _image.getvalue()
 
 
 class VkPhotoWorkflow(unittest.IsolatedAsyncioTestCase):
@@ -51,12 +55,19 @@ class VkPhotoWorkflow(unittest.IsolatedAsyncioTestCase):
                     if method == 'photos.getMessagesUploadServer':
                         return web.json_response({'response': {'upload_url': 'https://sun1.userapi.com/messages-upload'}})
                     if method == 'photos.saveMessagesPhoto':
+                        self.assertEqual(fields['photo'], 'uploaded')
+                        self.assertEqual(fields['server'], '1')
+                        self.assertEqual(fields['hash'], 'hash')
                         return web.json_response({'response': [{'owner_id': -123, 'id': 100}]})
                     self.fail(method)
                 if request.path == '/messages-upload':
                     self.assertNotIn('Authorization', request.headers)
                     fields = await request.post()
-                    self.assertEqual(fields['photo'].file.read(), PNG)
+                    self.assertEqual(fields['photo'].filename, 'preview.jpg')
+                    self.assertEqual(fields['photo'].content_type, 'image/jpeg')
+                    with Image.open(BytesIO(fields['photo'].file.read())) as preview:
+                        self.assertEqual(preview.format, 'JPEG')
+                        self.assertEqual(preview.size, (128, 96))
                     return web.json_response({'server': 1, 'photo': 'uploaded', 'hash': 'hash'})
                 if request.path.startswith('/photo/'):
                     self.assertNotIn('Authorization', request.headers)

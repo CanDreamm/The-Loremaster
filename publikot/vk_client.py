@@ -1,6 +1,6 @@
 """VK messages transport. The bot-community key is never used for wall.post."""
 import json
-import mimetypes
+import asyncio
 import re
 import secrets
 from pathlib import Path
@@ -9,10 +9,11 @@ from urllib.parse import urlparse
 import aiohttp
 
 from .providers import ProviderError
+from .vk_photo import preview_jpeg
 
 
 class VkApiError(ProviderError):
-    def __init__(self, method, code):
+    def __init__(self, method, code, detail=''):
         self.code = code if type(code) is int else None
         self.method = method if re.fullmatch(r'[A-Za-z]+\.[A-Za-z]+', method) else 'API'
         hints = {
@@ -26,7 +27,7 @@ class VkApiError(ProviderError):
             912: 'Включите «Возможности ботов» в настройках сообщений сообщества.',
         }
         super().__init__(f'ВК: {self.method}, ошибка API {self.code if self.code is not None else "неизвестна"}. '
-                         + hints.get(self.code, 'Проверьте права ключа и настройки сообщества.'))
+                         + hints.get(self.code, 'Проверьте права ключа и настройки сообщества.') + detail)
 
 
 def vk_keyboard(value):
@@ -99,7 +100,14 @@ class VkMessages:
                 result = await response.json()
                 if 'error' in result:
                     code = result['error'].get('error_code', '?')
-                    raise VkApiError(method, code)
+                    detail = ''
+                    if method == 'photos.saveMessagesPhoto' and code == 100:
+                        message = result['error'].get('error_msg', '')
+                        if isinstance(message, str):
+                            fields = re.findall(r'\b(photo|photos_list|server|hash)\b(?=\s+(?:is\b|must\b))', message)
+                            if fields:
+                                detail = ' Отклонённое поле: ' + ', '.join(dict.fromkeys(fields)) + '.'
+                    raise VkApiError(method, code, detail)
                 return result['response']
         except (aiohttp.ClientError, TimeoutError, KeyError, ValueError):
             raise ProviderError('Ошибка связи с API ВК. Секреты не выводятся.') from None
@@ -199,19 +207,34 @@ class VkMessages:
             raise
 
     async def send_photo(self, peer, path, caption=''):
+        encoded = await asyncio.to_thread(preview_jpeg, path)
         upload = await self.api('photos.getMessagesUploadServer', peer_id=peer)
-        if not trusted_vk_url(upload['upload_url']):
+        if not isinstance(upload, dict) or not isinstance(upload.get('upload_url'), str) or not trusted_vk_url(upload['upload_url']):
             raise ProviderError('ВК вернул неожиданный адрес загрузки.')
-        with Path(path).open('rb') as image:
-            data = aiohttp.FormData()
-            data.add_field('photo', image, filename=Path(path).name,
-                           content_type=mimetypes.guess_type(path)[0] or 'image/jpeg')
+        data = aiohttp.FormData()
+        data.add_field('photo', encoded, filename='preview.jpg', content_type='image/jpeg')
+        try:
             async with self.session.post(upload['upload_url'], data=data, allow_redirects=False,
                                          timeout=aiohttp.ClientTimeout(total=60)) as response:
                 if response.status != 200:
                     raise ProviderError('Не удалось загрузить фото предпросмотра.')
                 result = await response.json(content_type=None)
-        saved = await self.api('photos.saveMessagesPhoto', photo=result['photo'], server=result['server'], hash=result['hash'])
+        except (aiohttp.ClientError, TimeoutError, ValueError):
+            raise ProviderError('Не получен ответ загрузчика фото ВК. Файл сохранён; откройте задание повторно.') from None
+        if not isinstance(result, dict):
+            raise ProviderError('ВК вернул неожиданный ответ загрузчика фото. Файл сохранён.')
+        photo_value, server, upload_hash = result.get('photo'), result.get('server'), result.get('hash')
+        if not isinstance(photo_value, str) or photo_value.strip() in ('', '[]', '{}', 'null'):
+            raise ProviderError('Загрузчик ВК не вернул принятое фото (поле photo пустое или отсутствует). '
+                                'Сохранение не отправлено. Файл сохранён; откройте задание повторно.')
+        if (isinstance(server, bool) or not (type(server) is int and server > 0
+                or isinstance(server, str) and server.isdecimal() and int(server) > 0)
+                or not isinstance(upload_hash, str) or not upload_hash.strip()):
+            raise ProviderError('Загрузчик ВК вернул неверные server/hash. Сохранение не отправлено. Файл сохранён.')
+        saved = await self.api('photos.saveMessagesPhoto', photo=photo_value, server=int(server), hash=upload_hash)
+        if (not isinstance(saved, list) or not saved or not isinstance(saved[0], dict)
+                or type(saved[0].get('owner_id')) is not int or type(saved[0].get('id')) is not int):
+            raise ProviderError('ВК не подтвердил сохранение фото предпросмотра. Файл сохранён; откройте задание повторно.')
         photo = saved[0]
         attachment = f"photo{photo['owner_id']}_{photo['id']}"
         if photo.get('access_key'):

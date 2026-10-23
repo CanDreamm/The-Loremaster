@@ -10,6 +10,7 @@ from publikot.oauth import OAuthManager, VkOAuthProvider
 from publikot.settings import Settings
 from publikot.store import Store
 from publikot.vk_bot import VkBot
+from publikot.vk_client import VkApiError
 
 
 class FakeMessages:
@@ -28,6 +29,23 @@ class FakeMessages:
 
 
 class BotTests(unittest.IsolatedAsyncioTestCase):
+    async def test_preview_upload_error_keeps_body_menu_and_existing_generation(self):
+        await self.setup_project()
+        self.app.settings = replace(self.settings, demo=False)
+        self.app.text_ai.generate = AsyncMock(return_value='Сохранённый текст')
+        await self.send('/post История')
+        job = self.store.job(42)
+        self.store.replace_images(42, job['id'], job['revision'], ['/generated/existing.webp'])
+        revision = self.store.revision(42, job['id'])
+        self.client.send_photo = AsyncMock(side_effect=VkApiError('photos.saveMessagesPhoto', 100))
+        self.app.text_ai.generate = AsyncMock()
+        await self.app.preview(42, 42, job['id'])
+        self.assertTrue(any('Текст и изображение сохранены' in item['text'] for item in self.client.sent))
+        self.assertTrue(any(item['text'] == revision['body'] for item in self.client.sent))
+        self.assertIn('Изменить текст', self.labels())
+        self.assertEqual(self.store.job(42)['status'], 'review')
+        self.app.text_ai.generate.assert_not_awaited()
+
     async def asyncSetUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         directory = Path(self.tmp.name)

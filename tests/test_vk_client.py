@@ -22,7 +22,7 @@ class Response:
     async def __aexit__(self, *args):
         pass
 
-    async def json(self):
+    async def json(self, **kwargs):
         return self.data
 
 
@@ -145,6 +145,15 @@ class VkClientTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(VkApiError) as error:
             await VkMessages('private-key', 242305804, session).api('messages.send')
         self.assertNotIn('private-key', event_failure(error.exception))
+
+    async def test_photo_parameter_error_identifies_only_known_field_without_raw_response(self):
+        session = Session({'error': {'error_code': 100,
+            'error_msg': 'One of the parameters was invalid: photos_list is invalid private-key',
+            'request_params': [{'key': 'hash', 'value': 'private-hash'}]}})
+        with self.assertRaises(VkApiError) as caught:
+            await VkMessages('private-key', 123, session).api('photos.saveMessagesPhoto', photo='opaque')
+        self.assertIn('Отклонённое поле: photos_list', str(caught.exception))
+        self.assertNotIn('private-', str(caught.exception))
 
     async def test_long_poll_url_must_belong_to_vk(self):
         session = Session({'response': {'server': 'https://attacker.invalid/poll', 'key': 'secret', 'ts': '1'}})

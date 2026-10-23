@@ -207,7 +207,11 @@ class VkBot(BotMenus):
         label += f"Объём текста: {len(version['body'])} символов с пробелами.\n"
         await self.client.send(peer, label)
         for path in version_images(version):
-            await self.client.send_photo(peer, path)
+            try:
+                await self.client.send_photo(peer, path)
+            except ProviderError as error:
+                await self.client.send(peer, 'Не удалось показать изображение: ' + str(error) +
+                    '\nТекст и изображение сохранены. Для повторного предпросмотра откройте это задание ещё раз; ИИ повторно не вызывается.')
         if version['is_demo'] and version['text_prompt']:
             await self.client.send(peer, 'Промпт для текста:\n\n' + version['text_prompt'])
             await self.client.send(peer, 'Промпт для изображения:\n\n' + version['image_prompt'])
