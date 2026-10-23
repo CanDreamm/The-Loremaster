@@ -86,7 +86,7 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
         await self.click('Мои проекты')
         self.assertIn('Добавить проект', self.labels())
         await self.click(f'Бренд · №{project}')
-        self.assertEqual(self.labels(), ['Написать текст', 'Мои задания', 'Настройки проекта', 'Площадки', 'Участники', 'Назад', 'Главное меню'])
+        self.assertEqual(self.labels(), ['Написать пост', 'Мои задания', 'Настройки проекта', 'Площадки', 'Участники', 'Назад', 'Главное меню'])
         await self.click('Настройки проекта')
         self.assertEqual(self.labels(), ['Концепция', 'Правила для текста',
                                          'Персонажи', 'Генерация изображений', 'Промпт для текста', 'Промпт для изображения',
@@ -336,9 +336,7 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(json.loads(version['prompt_materials']), [
             {'role': 'character', 'path': '/cat.jpg'},
             {'role': 'reference', 'path': job['reference_path']}])
-        await self.click('Промпты')
-        self.assertIn(version['text_prompt'], self.client.sent[-2]['text'])
-        self.assertIn(version['image_prompt'], self.client.sent[-1]['text'])
+        self.assertNotIn('Промпты', self.labels())
         await self.send('/revise Убери восклицательный знак')
         current = self.store.revision(42, job['id'])
         self.assertIn('Убери восклицательный знак', current['text_prompt'])
@@ -398,7 +396,7 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('500', project['text_prompt'])
         self.assertEqual(len(self.store.projects(42)), 1)
         self.app.text_ai.generate = AsyncMock(return_value='Короткий текст о кофе')
-        await self.click('Написать текст')
+        await self.click('Написать пост')
         await self.send('Расскажи о новом сорте кофе')
         job = self.store.job(42)
         self.assertEqual(job['status'], 'review')

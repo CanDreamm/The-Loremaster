@@ -626,7 +626,7 @@ def create_web_app(manager, notify=None):
         if notify:
             try:
                 await notify(row['actor'], f"Сообщество {row['group_id']} подключено к проекту №{row['project_id']}. Теперь можно готовить текст.",
-                             keyboard=keyboard([button('Написать текст', 'compose', project=row['project_id'])],
+                             keyboard=keyboard([button('Написать пост', 'compose', project=row['project_id'])],
                                                [button('Меню сообщества', 'workspace', project=row['project_id'])]))
             except Exception:
                 pass  # Подключение сохранено; доставка уведомления не должна его отменять.

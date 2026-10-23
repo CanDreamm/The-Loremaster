@@ -49,7 +49,6 @@ def preview_keyboard(job, is_demo=False):
     rows.append(([button('Опубликовать', 'publish', 'positive')] if not is_demo and len(version_images(job)) >= count and (job.get('destinations', '[]') != '[]' if job.get('publish_mode') == 'platforms' else job['target_group'] or job.get('browser_target')) else [])
                 + [button('Отменить черновик', 'cancel', 'negative')])
     rows.append(back(job['project_id']))
-    rows.insert(-1, [menu_button('Промпты', 'prompts', project=job['project_id'], job=job['id'])])
     return keyboard(*rows)
 
 

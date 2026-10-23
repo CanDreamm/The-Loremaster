@@ -86,7 +86,7 @@ class BotMenus(PlatformMenus):
     async def workspace(self, actor, peer, project_id):
         self.store.select(actor, project_id)
         p = self.store.project(actor)
-        rows = [[button('Написать текст', 'compose', project=project_id)],
+        rows = [[button('Написать пост', 'compose', project=project_id)],
                 [button('Мои задания', 'jobs', project=project_id)],
                 [button('Настройки проекта', 'settings', project=project_id)],
                 [button('Площадки', 'platforms', project=project_id), button('Участники', 'participants', project=project_id)],
@@ -132,7 +132,7 @@ class BotMenus(PlatformMenus):
             return await self.home(actor, peer)
         if screen == 'help':
             return await self.client.send(peer, '1. Создайте проект в «Мои проекты».\n'
-                '2. В «Площадках» подключите аккаунты через личный токен Postmypost или сеанс Дзена.\n3. Нажмите «Написать текст» и отправьте задание.\n'
+                '2. В «Площадках» подключите аккаунты через личный токен Postmypost или сеанс Дзена.\n3. Нажмите «Написать пост» и отправьте задание.\n'
                 '4. Готовый текст можно исправить по замечанию. Публикация требует отдельного подтверждения.\n'
                 'Назад отменяет ввод. Команда /menu всегда открывает главное меню.\n'
                 'Полный список команд: /help.', keyboard=keyboard(back()))
@@ -283,7 +283,7 @@ class BotMenus(PlatformMenus):
             if nav:
                 rows.append(nav)
             rows.append(back(project_id))
-            return await self.client.send(peer, 'Последние задания.' if jobs else 'Заданий пока нет. Нажмите «Написать текст» в меню проекта.',
+            return await self.client.send(peer, 'Последние задания.' if jobs else 'Заданий пока нет. Нажмите «Написать пост» в меню проекта.',
                                           keyboard=keyboard(*rows))
         if screen == 'job':
             job = self.store.job(actor, int(payload['job']))
@@ -387,14 +387,14 @@ class BotMenus(PlatformMenus):
             await self.client.send(peer,
                 'Площадка сохранена. Для входа на компьютере с ботом следуйте docs/browser-publishing.md. '
                 'После входа можно создавать задания и подтверждать публикацию.',
-                keyboard=keyboard([button('Написать текст', 'compose', project=project_id)], back(project_id)))
+                keyboard=keyboard([button('Написать пост', 'compose', project=project_id)], back(project_id)))
         elif kind == 'group':
             group = await self.group_id(text)
             self.store.configure(actor, 'vk_group', group)
             self.store.set_dialog(actor, None)
             await self.client.send(peer, 'Сообщество сохранено. Можно сразу готовить тексты. Для публикаций подключите ВК.',
                 keyboard=keyboard([button('Подключить ВК', 'authorize', project=project_id)],
-                                  [button('Написать текст', 'compose', project=project_id)], back(project_id)))
+                                  [button('Написать пост', 'compose', project=project_id)], back(project_id)))
         elif kind == 'ai_image':
             if not text or len(text) > 4000:
                 raise Conflict('Отправьте замечания к изображению до 4000 символов.')
